@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import List
 
-from helpers import llmclient
+from helpers.llmclient import llm_call, extract_json_from_markdown
 from utils.types import OrchestratorError, TaskDecompositionError
 
 
@@ -120,7 +120,7 @@ class ResearchOrchestrator:
             plan_dict = raw_response
         else:
             try:
-                plan_dict = json.loads(raw_response)
+                plan_dict = extract_json_from_markdown(raw_response)
             except Exception as e:
                 raise TaskDecompositionError(f"Invalid JSON from LLM: {e}")
 
@@ -131,6 +131,9 @@ class ResearchOrchestrator:
                 raise TaskDecompositionError(f"Missing required field '{f}' in plan")
 
         subtasks = []
+        if len(plan_dict["subtasks"]) > self.MAX_SUBAGENTS:
+            plan_dict["subtasks"] = plan_dict["subtasks"][: self.MAX_SUBAGENTS]
+
         for i, st in enumerate(plan_dict["subtasks"], start=1):
             if i > self.MAX_SUBAGENTS:
                 break  # enforce max
@@ -155,6 +158,9 @@ class ResearchOrchestrator:
         if not subtasks:
             raise TaskDecompositionError("No valid subtasks produced by LLM")
 
+        if len(subtasks) > self.MAX_SUBAGENTS:
+            raise TaskDecompositionError("Subtasks created exceeds max allowed")
+
         return TaskPlan(
             strategy=plan_dict["strategy"],
             query_type=plan_dict["query_type"],
@@ -162,18 +168,16 @@ class ResearchOrchestrator:
             complexity_score=plan_dict.get("complexity", 1),
         )
 
-    async def analyze_query(self, query: str):
+    def analyze_query(self, query: str):
         prompt = self._build_prompt(query)
-        raw = await llmclient.llm_call(query, prompt)
+        raw = llm_call(query, prompt)
         return self._parse_and_validate(raw)
 
 
 def main():
     orchestrator = ResearchOrchestrator()
-    return orchestrator.analyze_query(
-        "What are the most employable skills in tech for remote workers today?"
-    )
+    return orchestrator.analyze_query("What is the capital of Fiji?")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

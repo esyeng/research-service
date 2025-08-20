@@ -33,8 +33,7 @@ def patch_llm_call(monkeypatch):
 # --- actual tests ---
 
 
-@pytest.mark.asyncio
-async def test_simple_query_decomposition(patch_llm_call):
+def test_simple_query_decomposition(patch_llm_call):
     """Single fact queries should return 1 straightforward subtask"""
     orchestrator = ResearchOrchestrator()
     patch_llm_call["What is the population of Tokyo?"] = {
@@ -54,14 +53,13 @@ async def test_simple_query_decomposition(patch_llm_call):
         ],
     }
 
-    result = await orchestrator.analyze_query("What is the population of Tokyo?")
+    result = orchestrator.analyze_query("What is the population of Tokyo?")
     assert result.query_type == "straightforward"
     assert result.complexity_score == 1
     assert len(result.subtasks) == 1
 
 
-@pytest.mark.asyncio
-async def test_comparative_query_decomposition(patch_llm_call):
+def test_comparative_query_decomposition(patch_llm_call):
     """Comparative queries should yield 2-3 subtasks (breadth_first)"""
     orchestrator = ResearchOrchestrator()
     patch_llm_call["Compare the economies of Nordic countries"] = {
@@ -90,15 +88,12 @@ async def test_comparative_query_decomposition(patch_llm_call):
         ],
     }
 
-    result = await orchestrator.analyze_query(
-        "Compare the economies of Nordic countries"
-    )
+    result = orchestrator.analyze_query("Compare the economies of Nordic countries")
     assert result.query_type == "breadth_first"
     assert 2 <= len(result.subtasks) <= 4
 
 
-@pytest.mark.asyncio
-async def test_depth_query_decomposition(patch_llm_call):
+def test_depth_query_decomposition(patch_llm_call):
     """Depth-first queries should produce multiple perspectives on one topic"""
     orchestrator = ResearchOrchestrator()
     patch_llm_call["Best approach to AI finance agents in 2025?"] = {
@@ -136,16 +131,13 @@ async def test_depth_query_decomposition(patch_llm_call):
         ],
     }
 
-    result = await orchestrator.analyze_query(
-        "Best approach to AI finance agents in 2025?"
-    )
+    result = orchestrator.analyze_query("Best approach to AI finance agents in 2025?")
     assert result.query_type == "depth_first"
     assert result.complexity_score == 3
     assert 2 <= len(result.subtasks) <= 4
 
 
-@pytest.mark.asyncio
-async def test_overly_broad_query_caps_subtasks(patch_llm_call):
+def test_overly_broad_query_caps_subtasks(patch_llm_call):
     """Even if LLM wants to return 10 subtasks, orchestrator should cap at 4"""
     orchestrator = ResearchOrchestrator()
     # simulate ridiculous LLM output
@@ -167,13 +159,12 @@ async def test_overly_broad_query_caps_subtasks(patch_llm_call):
         ],
     }
 
-    result = await orchestrator.analyze_query("Explain history of the universe")
+    result = orchestrator.analyze_query("Explain history of the universe")
     # TODO enforce truncation inside analyze_query
     assert len(result.subtasks) <= 4
 
 
-@pytest.mark.asyncio
-async def test_invalid_json_raises_decomposition_error(monkeypatch):
+def test_invalid_json_raises_decomposition_error(monkeypatch):
     """If invalid JSON and/or incorrect nonsense, raise TaskDecompositionError"""
 
     orchestrator = ResearchOrchestrator()
@@ -184,11 +175,10 @@ async def test_invalid_json_raises_decomposition_error(monkeypatch):
     monkeypatch.setattr("orchestrator.llm_call", fake_llm_call)
 
     with pytest.raises(TaskDecompositionError):
-        await orchestrator.analyze_query("nonsense query")
+        orchestrator.analyze_query("nonsense query")
 
 
-@pytest.mark.asyncio
-async def test_missing_fields_in_response(monkeypatch):
+def test_missing_fields_in_response(monkeypatch):
     """If required fields are missing, raise TaskDecompositionError"""
 
     orchestrator = ResearchOrchestrator()
@@ -203,38 +193,7 @@ async def test_missing_fields_in_response(monkeypatch):
     monkeypatch.setattr("orchestrator.llm_call", fake_llm_call)
 
     with pytest.raises(TaskDecompositionError):
-        await orchestrator.analyze_query("incomplete plan query")
-
-
-@pytest.mark.asyncio
-async def test_too_many_subtasks_triggers_error(monkeypatch):
-    """If over max subagent capacity, raise TaskDecompositionError"""
-
-    orchestrator = ResearchOrchestrator()
-
-    def fake_llm_call(query, prompt):
-        return {
-            "query_type": "breadth_first",
-            "complexity": 3,
-            "strategy": "Make everything its own subtask",
-            "subtasks": [
-                {
-                    "id": f"task_{i}",
-                    "objective": "blah",
-                    "scope": "meh",
-                    "search_queries": ["q"],
-                    "expected_output": "x",
-                    "max_searches": 1,
-                    "priority": "low",
-                }
-                for i in range(10)
-            ],
-        }
-
-    monkeypatch.setattr("orchestrator.llm_call", fake_llm_call)
-
-    with pytest.raises(TaskDecompositionError):
-        await orchestrator.analyze_query("way too broad query")
+        orchestrator.analyze_query("incomplete plan query")
 
 
 # **Test Cases:**
