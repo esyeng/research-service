@@ -34,7 +34,13 @@ def llm_call(
     with client.messages.stream(
         model=model,
         max_tokens=64000,
-        system=system_prompt,
+        system=[
+            {
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],  # utilize prompt caching of system message for cost efficiency
         messages=messages,
         temperature=0.1,
     ) as stream:

@@ -1,8 +1,9 @@
 import json
 import asyncio
+import datetime
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List
+from typing import List, Dict
 
 from helpers.llmclient import llm_call, extract_json_from_markdown
 from utils.types import OrchestratorError, TaskDecompositionError
@@ -25,6 +26,15 @@ class TaskPlan:
     complexity_score: int = 1  # scale: 1=simple, 2=moderate, 3=complex
 
 
+@dataclass
+class ResourceConfig:
+    max_subagents: int
+    searches_per_agent: int
+    model_per_task: Dict[str, str] = field(default_factory=dict)
+    total_token_budget: int = 0
+    timeout_seconds: int = 0
+
+
 class Query(Enum):
     straightforward = 1
     breadth_first = 2
@@ -39,15 +49,41 @@ class ResearchOrchestrator:
     def __init__(self):
         self.memory = []
 
-    def _build_prompt(self, query: str) -> str:
+    def _select_model(self, complexity_score: int, orchestrate: bool = False) -> str:
+        model_choices = {
+            "straightforward": "claude-3-5-haiku-20241022",
+            "moderate": "claude-sonnet-4-20250514",
+            "complex": "claude-opus-4-1-20250805",
+        }
+        if orchestrate:
+            return model_choices["complex"]
+        if complexity_score > 3:
+            raise OrchestratorError("Complexity score out of range")
+        if complexity_score == 1:
+            return model_choices["straightforward"]
+        elif complexity_score == 2:
+            return model_choices["moderate"]
+        elif complexity_score == 3:
+            return model_choices["moderate"]
+        else:
+            return model_choices["moderate"]
+    
+
+    def _build_prompt(self, **kwargs) -> str:
         """
         Construct the LLM prompt for a given query.
         Encapsulates the template, instructions, and examples.
         """
+        # TODO - Determine next step in iterative building:
+                # either
+                    # modularize then chunk analysis, allocation, delegation, monitoring, synthesis
+                    # orchestrate using tools from master prompt
+                # I think MVP -> modular then stitch
+                # possibly improve efficiency -> master prompt with tooling
         template = """
     Purpose: Transform user query into actionable research plan
     You are an AI research assistant working as a key analyst in a research workflow that handles research queries and evaluates their complexity in order to plan research sub-tasks which will be delegated to sub-agents.
-
+    The current date is {current_date}
     Query to analyze:
     "{query}"
 
@@ -109,7 +145,10 @@ class ResearchOrchestrator:
     }}
     </delegation_format>
     """
-        return template.format(query=query)
+        try:
+            return template.format(**kwargs)
+        except KeyError as e:
+            raise ValueError(f"Missing required prompt variable: {e}")
 
     def _parse_and_validate(self, raw_response: str | dict) -> TaskPlan:
         """
@@ -169,7 +208,7 @@ class ResearchOrchestrator:
         )
 
     def analyze_query(self, query: str):
-        prompt = self._build_prompt(query)
+        prompt = self._build_prompt(query=query, current_date=datetime.date.today())
         raw = llm_call(query, prompt)
         return self._parse_and_validate(raw)
 
