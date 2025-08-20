@@ -1,0 +1,67 @@
+{
+    "examples": [
+        {   "original question": "What are the most employable skills in tech for remote workers today?",
+            "query_type": "breadth_first",
+            "complexity": 2,
+            "strategy": "Break down into distinct skill categories and market analysis components. Research current demand across different tech domains, then analyze remote work specific requirements, and examine hiring trends to provide comprehensive employability insights.",
+            "subtasks": [
+                {
+                    "id": "task_001",
+                    "objective": "Identify top technical skills in highest demand for remote tech positions",
+                    "scope": "Focus on programming languages, frameworks, cloud technologies, and technical tools that appear most frequently in remote job postings and industry reports for 2024-2025",
+                    "search_queries": [
+                        "most in demand programming languages 2024 remote jobs",
+                        "top technical skills remote software developer 2024",
+                        "cloud computing skills demand remote work",
+                        "tech stack trends remote hiring 2024"
+                    ],
+                    "expected_output": "Ranked list of technical skills with supporting data on job market demand, salary ranges, and growth projections",
+                    "max_searches": 5,
+                    "priority": "high"
+                },
+                {
+                    "id": "task_002",
+                    "objective": "Research soft skills and remote work competencies essential for tech professionals",
+                    "scope": "Examine communication, collaboration, time management, and other interpersonal skills specifically valued for remote tech work environments",
+                    "search_queries": [
+                        "essential soft skills remote tech workers 2024",
+                        "communication skills remote software teams",
+                        "remote work competencies tech industry",
+                        "virtual collaboration skills tech professionals"
+                    ],
+                    "expected_output": "Comprehensive list of soft skills with explanations of why they're critical for remote tech work success",
+                    "max_searches": 4,
+                    "priority": "high"
+                },
+                {
+                    "id": "task_003",
+                    "objective": "Analyze emerging and future-focused skills gaining traction in remote tech hiring",
+                    "scope": "Research AI/ML, cybersecurity, data science, and other emerging technology areas with strong remote work opportunities and growth potential",
+                    "search_queries": [
+                        "emerging tech skills 2024 remote jobs",
+                        "AI machine learning remote job demand",
+                        "cybersecurity skills remote work trends",
+                        "data science remote hiring 2024"
+                    ],
+                    "expected_output": "Analysis of trending skills with growth potential, entry barriers, and learning pathways for career transition",
+                    "max_searches": 4,
+                    "priority": "medium"
+                },
+                {
+                    "id": "task_004",
+                    "objective": "Examine industry-specific skill requirements and remote work adoption rates",
+                    "scope": "Compare skill demands across different tech sectors (fintech, healthtech, e-commerce, etc.) and their remote work policies to identify best opportunities",
+                    "search_queries": [
+                        "tech industry remote work adoption rates 2024",
+                        "fintech remote job skills requirements",
+                        "startup vs enterprise remote tech skills",
+                        "tech sector remote hiring trends"
+                    ],
+                    "expected_output": "Sector-by-sector breakdown of skill requirements and remote work opportunities with strategic recommendations",
+                    "max_searches": 4,
+                    "priority": "medium"
+                }
+            ]
+        }
+    ]
+}
