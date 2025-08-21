@@ -1,47 +1,40 @@
-import json
-import asyncio
 import datetime
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import List, Dict
-
+from typing import List
 from helpers.llmclient import llm_call, extract_json_from_markdown
-from utils.types import OrchestratorError, TaskDecompositionError
-
-
-@dataclass
-class SubTask:
-    id: str
-    objective: str
-    search_focus: List[str]
-    expected_output: str
-    max_search_calls: int = 1
-
-
-@dataclass
-class TaskPlan:
-    strategy: str
-    query_type: str
-    subtasks: List[SubTask] = field(default_factory=list)
-    complexity_score: int = 1  # scale: 1=simple, 2=moderate, 3=complex
-
-
-@dataclass
-class ResourceConfig:
-    max_subagents: int
-    searches_per_agent: int
-    model_per_task: Dict[str, str] = field(default_factory=dict)
-    total_token_budget: int = 0
-    timeout_seconds: int = 0
-
-
-class Query(Enum):
-    straightforward = 1
-    breadth_first = 2
-    depth_first = 3
+from utils.types import (
+    SubTask,
+    TaskPlan,
+    ResourceConfig,
+    OrchestratorError,
+    TaskDecompositionError,
+)
+from prompts.research_subagent import txt as research_subagent_prompt
 
 
 class ResearchOrchestrator:
+    """Orchestrates the decomposition and allocation of research queries into actionable sub-tasks for AI research agents.
+    Attributes:
+        MAX_SUBAGENTS (int): Maximum number of sub-agents allowed per query.
+        MAX_SEARCHES_PER_AGENT (int): Maximum number of searches each sub-agent can perform.
+        SUBAGENT_TIMEOUT (int): Timeout in seconds for each sub-agent's task.
+        memory (list): Internal memory for storing orchestrator state or history.
+    Methods:
+        __init__():
+            Initializes the orchestrator and its memory.
+        _allocate_resources(complexity_score: int, orchestrate: bool = False) -> ResourceConfig | str:
+            Allocates resources and selects model configuration based on query complexity.
+        _build_task_plan(**kwargs) -> str:
+            Constructs the LLM prompt for analyzing and decomposing a research query.
+        _build_subagent_prompt(self, subtask: SubTask, tools_available: List[str]) -> str:
+            Build focused subagent prompt using Anthropic's template
+        _parse_and_validate(raw_response: str | dict) -> TaskPlan:
+            Parses and validates the LLM output, ensuring it meets required structure and rules.
+        _estimate_subtask_complexity(self, subtask: SubTask) -> int:
+            estimate subtask complexity for budget setting
+        analyze_query(query: str):
+            Main entry point for analyzing a research query, generating a prompt, invoking the LLM, and returning a validated TaskPlan.
+    """
+
     MAX_SUBAGENTS = 4
     MAX_SEARCHES_PER_AGENT = 10
     SUBAGENT_TIMEOUT = 120
@@ -49,37 +42,42 @@ class ResearchOrchestrator:
     def __init__(self):
         self.memory = []
 
-    def _select_model(self, complexity_score: int, orchestrate: bool = False) -> str:
+    def _allocate_resources(
+        self, task_plan: TaskPlan, orchestrate: bool = False
+    ) -> ResourceConfig | str:
         model_choices = {
             "straightforward": "claude-3-5-haiku-20241022",
             "moderate": "claude-sonnet-4-20250514",
             "complex": "claude-opus-4-1-20250805",
         }
+        simp = task_plan.complexity_score == 1
+        mid = task_plan.complexity_score == 2
         if orchestrate:
-            return model_choices["complex"]
-        if complexity_score > 3:
+            model_choices["complex"]
+        if task_plan.complexity_score > 3:
             raise OrchestratorError("Complexity score out of range")
-        if complexity_score == 1:
-            return model_choices["straightforward"]
-        elif complexity_score == 2:
-            return model_choices["moderate"]
-        elif complexity_score == 3:
-            return model_choices["moderate"]
-        else:
-            return model_choices["moderate"]
-    
 
-    def _build_prompt(self, **kwargs) -> str:
+        return ResourceConfig(
+            max_subagents=1 if simp else 3 if mid else 4,
+            searches_per_agent=4 if simp else 7 if mid else 12,
+            model_per_task=(
+                model_choices["straightforward"] if simp else model_choices["moderate"]
+            ),
+            total_token_budget=8000 if simp else 16000,
+            timeout_seconds=60 if simp else 120,
+        )
+
+    def _build_task_plan(self, **kwargs) -> str:
         """
         Construct the LLM prompt for a given query.
         Encapsulates the template, instructions, and examples.
         """
         # TODO - Determine next step in iterative building:
-                # either
-                    # modularize then chunk analysis, allocation, delegation, monitoring, synthesis
-                    # orchestrate using tools from master prompt
-                # I think MVP -> modular then stitch
-                # possibly improve efficiency -> master prompt with tooling
+        # either
+        # modularize then chunk analysis, allocation, delegation, monitoring, synthesis
+        # orchestrate using tools from master prompt
+        # I think MVP -> modular then stitch
+        # possibly improve efficiency -> master prompt with tooling
         template = """
     Purpose: Transform user query into actionable research plan
     You are an AI research assistant working as a key analyst in a research workflow that handles research queries and evaluates their complexity in order to plan research sub-tasks which will be delegated to sub-agents.
@@ -145,10 +143,48 @@ class ResearchOrchestrator:
     }}
     </delegation_format>
     """
+    # next step here: run allocate_resources on 
         try:
             return template.format(**kwargs)
         except KeyError as e:
             raise ValueError(f"Missing required prompt variable: {e}")
+
+    def _build_subagent_prompt(self, subtask: SubTask, tools_available: List[str]) -> str:
+        """Build focused subagent prompt using Anthropic's template"""
+    
+        # Adapt the complexity to tool call budget
+        complexity_to_budget = {
+            1: "under 5 tool calls",  # simple
+            2: "5-8 tool calls",      # medium  
+            3: "8-15 tool calls"      # complex
+        }
+        
+        # This is Anthropic's prompt with your task injected
+        return f"""
+        You are a research subagent working as part of a team. The current date is {datetime}. 
+
+        <task>
+        Objective: {subtask.objective}
+        Expected Output: {subtask.expected_output}
+        Suggested Starting Points: {subtask.search_focus}
+        Research Budget: {complexity_to_budget.get(self._estimate_subtask_complexity(subtask), "5-8 tool calls")}
+        Maximum Tool Calls: {subtask.max_search_calls}
+        </task>
+
+            {research_subagent_prompt}  # The full prompt you provided
+
+        Available tools: {", ".join(tools_available)}
+        """
+
+    def _estimate_subtask_complexity(self, subtask: SubTask) -> int:
+        """Quick heuristic to estimate subtask complexity for budget setting"""
+        # Simple heuristics based on objective length, search focus count, etc.
+        if len(subtask.search_focus) <= 2 and len(subtask.objective.split()) <= 10:
+            return 1
+        elif len(subtask.search_focus) <= 4 and len(subtask.objective.split()) <= 20:
+            return 2
+        else:
+            return 3
 
     def _parse_and_validate(self, raw_response: str | dict) -> TaskPlan:
         """
@@ -187,6 +223,7 @@ class ResearchOrchestrator:
                     objective=st["objective"],
                     search_focus=st.get("search_queries", []),
                     expected_output=st["expected_output"],
+                    priority=st["priority"],
                     max_search_calls=min(
                         st.get("max_searches", 1),
                         self.MAX_SEARCHES_PER_AGENT,
@@ -208,14 +245,41 @@ class ResearchOrchestrator:
         )
 
     def analyze_query(self, query: str):
-        prompt = self._build_prompt(query=query, current_date=datetime.date.today())
-        raw = llm_call(query, prompt)
+        plan_json = self._build_task_plan(query=query, current_date=datetime.date.today())
+        raw = llm_call(query, plan_json)
         return self._parse_and_validate(raw)
+        
+    
+    async def execute_research(self, query: str) -> dict:
+        """Main research flow with orchestrated tool-calling"""
+        task_plan = self.analyze_query(query)
+        orchestration_prompt = f"""
+        You are a research orchestrator executing this plan:
+
+        Original Query: {query}
+        Strategy: {task_plan.strategy}
+        Query Type: {task_plan.query_type}
+        Subtasks: {len(task_plan.subtasks)} parallel tasks
+
+        Your job:
+        1. Use run_subagent tool for each subtask in parallel
+        2. Monitor progress and handle any failures
+        3. Synthesize all results into a comprehensive report
+        4. Use complete_research when done
+
+        Key constraints from planning:
+        - Maximum {len(task_plan.subtasks)} subagents
+        - Each subtask has specific boundaries to prevent overlap
+        - Stop research when you have sufficient information
+
+        Execute the plan now using parallel subagent calls.
+        """
+        
 
 
 def main():
     orchestrator = ResearchOrchestrator()
-    return orchestrator.analyze_query("What is the capital of Fiji?")
+    return orchestrator.analyze_query("What are the best ways to treat PCOS symptoms besides birth control?")
 
 
 if __name__ == "__main__":

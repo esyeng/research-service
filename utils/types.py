@@ -1,3 +1,69 @@
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import List, Dict, Any
+
+# Data classes ******************************
+
+
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments: Dict[str, Any]
+
+
+@dataclass 
+class ToolResult:
+    tool_call_id: str
+    content: Any
+    error: str | None = None
+
+
+@dataclass
+class SubTask:
+    id: str
+    objective: str
+    search_focus: List[str]
+    expected_output: str
+    priority: str
+    max_search_calls: int = 1
+
+
+@dataclass
+class TaskPlan:
+    strategy: str
+    query_type: str
+    subtasks: List[SubTask] = field(default_factory=list)
+    complexity_score: int = 1  # scale: 1=simple, 2=moderate, 3=complex
+
+
+@dataclass
+class ResourceConfig:
+    max_subagents: int
+    searches_per_agent: int
+    model_per_task: str = "claude-sonnet-4-20250514"
+    total_token_budget: int = 0
+    timeout_seconds: int = 0
+
+
+@dataclass
+class SubTaskResult:
+    task_id: str
+    status: str  # "completed"|"timeout"|"error"
+    findings: dict
+    tool_calls_used: int
+    execution_time: float
+    error_message: str | None = None
+
+
+class Query(Enum):
+    straightforward = 1
+    breadth_first = 2
+    depth_first = 3
+
+
+# Error handling ****************************
+
 class OrchestratorError(Exception):
     """Base exception for orchestrator failures"""
 
