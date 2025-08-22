@@ -2,14 +2,31 @@ import os
 import re
 import json
 import asyncio
+import aiohttp
+import httpx
+from utils.types import OrchestratorError
 from utils.types import ToolCall, ToolResult
 from typing import List, Dict, Callable
-from anthropic import Anthropic, AsyncAnthropic
+from anthropic import Anthropic, AsyncAnthropic, DefaultAioHttpClient
+from anthropic.types import APIErrorObject, ErrorResponse
+from anthropic.types import Message
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# m = Message(
 
+# )
+# s = StopReason(
+
+# )
+# t = ToolUseBlock(
+
+# )
+# b = ToolResultBlockParam(
+
+
+# )
 def require_env(name: str) -> str:
     v = os.getenv(name)
     if v is None or not v.strip():
@@ -38,7 +55,14 @@ def _convert_tool_definition(tool_def: Dict) -> Dict:
 async def _execute_tool_calls(
     tool_calls: List, available_tools: List[Dict]
 ) -> List[ToolResult]:
-    """Execute tool calls in parallel and return results"""
+    """
+    Execute tool calls in parallel and return results
+    Args: 
+        tool_calls (List)
+        available_tools (List[Dict])
+    Returns:
+        List[ToolResult]
+    """
 
     # Create tool lookup
     tool_functions = {tool["name"]: tool["function"] for tool in available_tools}
@@ -80,7 +104,17 @@ async def _execute_tool_calls(
 async def _safe_tool_execution(
     tool_call: ToolCall, tool_function: Callable
 ) -> ToolResult:
-    """Execute a single tool with error handling"""
+    """
+    Execute a single tool with error handling
+    Args:
+        tool_call (ToolCall): @dataclass ToolCall(id: str name: str arguments: Dict[str, Any])
+        tool_function (Callable): The callable function to send to the model. Defaults to "".
+       
+    Returns:
+        ToolResult(tool_call_id: str content: Any error: str | None = None)
+
+    """
+    
     try:
         # Parse arguments
         if isinstance(tool_call.arguments, str):
@@ -104,19 +138,50 @@ async def _create_error_result(tool_call_id: str, error_msg: str) -> ToolResult:
     return ToolResult(tool_call_id=tool_call_id, content=None, error=error_msg)
 
 
-async def llm_async(messages, tools, model, max_tokens):
-    client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-    return await client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        messages=messages,
-        tools=tools,
-    )
+async def stream_llm_messages_async(messages, tools, model, max_tokens) -> Message:
+    """
+    Call LLM asynchronously, streaming messages with tools
+    Args:
+        messages (List[Message]): The messages to send to the model
+        tools (List[Tool]): The tools to give model access to
+        model (str, optional): The model to use for the call. Defaults to "claude-sonnet-4-20250514".,
+        max_tokens (int, optional)
+    Returns:
+        str: The MesssageStreamManager from the language model.
+    """
+    try:
+        async with AsyncAnthropic(
+            api_key=ANTHROPIC_API_KEY, http_client=httpx.AsyncClient()
+        ) as client:
+            async with client.messages.stream(
+                model=model,
+                max_tokens=max_tokens,
+                messages=messages,
+                tools=tools,
+            ) as stream:
+                async for event in stream:
+                    if event.type == "text":
+                        print(event.text, end="", flush=True)
+                    elif event.type == "content_block_stop":
+                        print("\ncontent block finished accumulating:", event.content_block)
+            
+            accumulated = await stream.get_final_message()
+            return accumulated
+    except OrchestratorError as e:
+        print(f"Error in stream_message: {e}")
+        return None
+        
+    # return await client.messages.create(
+    #     model=model,
+    #     max_tokens=max_tokens,
+    #     messages=messages,
+    #     tools=tools,
+    # )
 
 
-def llm_call(
+def stream_llm_sync(
     prompt: str, system_prompt: str = "", model: str = "claude-sonnet-4-20250514"
-) -> str:
+):
     """
     Calls the model with the given prompt and returns the response.
     Args:
@@ -154,6 +219,7 @@ def llm_call(
     print("accumulated message: ", accumulated.to_json())
     return accumulated.content[0].text
 
+MAX_TOOL_CALLS = 20
 
 async def llm_call_with_tools(
     prompt: str,
@@ -165,11 +231,20 @@ async def llm_call_with_tools(
     """
     Execute LLM with tool calling capability.
     Handles the conversation loop until LLM signals completion.
+    
+    Args: 
+        prompt (str): prompt to call model with
+        tools (List[Dict]): tool definitions
+        model (str)
+        max_tokens (int)
+        timeout (int)
+    Returns: 
+        Dict - final message to user with results and indicator of finishing
     """
-
+    final = {}
     messages = [{"role": "user", "content": prompt}]
     tool_calls_count = 0
-    max_tool_calls = 20
+    max_tool_calls = MAX_TOOL_CALLS
 
     # Convert tool definitions to Anthropic format
     formatted_tools = [_convert_tool_definition(tool) for tool in tools]
@@ -178,48 +253,56 @@ async def llm_call_with_tools(
         try:
             # Call API with formatted tool definitions
             response = await asyncio.wait_for(
-                llm_async(messages, formatted_tools, model, max_tokens), timeout=timeout
+                stream_llm_messages_async(messages, formatted_tools, model, max_tokens),
+                timeout=timeout,
             )
+            # print(f"response object, llmclient.py line 199: {response}")
+            print(f"OBJ TYPE, llmclient.py line ~259: {type(response)}")
+            tool_calls_count += 1
+            if response:
+                if (
+                    hasattr(response, "content")
+                    and isinstance(response.content, list)
+                    and len(response.content) > 0
+                ):
+                    assistant_content = response.content[0].text
 
-            # Add assistant response to conversation
-            assistant_content = (
-                response.content[0].text
-                if hasattr(response, "content") and isinstance(response.content, list) and len(response.content) > 0 and hasattr(response.content[0], "text")
-                else str(response.content)
-            )
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": assistant_content,
-                }
-            )
-            tool_calls = getattr(response, "tool_calls", None)
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": assistant_content,
+                        }
+                    )
+                    if (
+                        response.stop_reason == "tool_use"
+                        or response.content[0].type == "tool_use"
+                    ):
+                        tool_calls = response.content
 
-            # If no tool calls, LLM is done
-            if not tool_calls:
-                return {
-                    "final_response": response.content,
-                    "tool_calls_count": tool_calls_count,
-                    "conversation": messages,
-                }
+                        # if not tool_calls:
+                        #     final = {
+                        #         "final_response": response.content,
+                        #         "tool_calls_count": tool_calls_count,
+                        #         "conversation": messages,
+                        #     }
+                        if isinstance(tool_calls, list):
+                            # execute tool calls in parallel
+                            tool_results = await _execute_tool_calls(tool_calls, tools)
+                            tool_calls_count += len(tool_calls)
 
-            # Execute tool calls in parallel
-            tool_results = await _execute_tool_calls(tool_calls, tools)
-            tool_calls_count += len(tool_calls)
-
-            # Add tool results back to conversation
-            for result in tool_results:
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": result.tool_call_id,
-                        "content": (
-                            json.dumps(result.content)
-                            if result.error is None
-                            else f"Error: {result.error}"
-                        ),
-                    }
-                )
+                            # add tool results back to conversation
+                            for result in tool_results:
+                                messages.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": result.tool_call_id,
+                                        "content": (
+                                            json.dumps(result.content)
+                                            if result.error is None
+                                            else f"Error: {result.error}"
+                                        ),
+                                    }
+                                )
 
         except asyncio.TimeoutError:
             return {
@@ -235,14 +318,15 @@ async def llm_call_with_tools(
                 "error": str(e),
                 "conversation": messages,
             }
-
-    # Hit tool call limit
-    return {
+    final = {
         "final_response": "Reached maximum tool call limit",
         "tool_calls_count": tool_calls_count,
         "error": "max_tool_calls_exceeded",
         "conversation": messages,
     }
+    print(f"\n\n\n\nhit final message llmclient line 269: {final}\n\n\n\n")
+    # Hit tool call limit
+    return final
 
 
 def extract_xml(text: str, tag: str) -> str:
@@ -266,3 +350,11 @@ def extract_json_from_markdown(raw_response: str) -> dict:
     else:
         json_str = raw_response
     return json.loads(json_str)
+
+
+"""
+(
+    response[0]
+    if hasattr(response, "content") and isinstance(response[0].content, list) and len(response[0].content) > 0 and hasattr(response[0].content[0], "text")
+    else str(response[0])
+)"""

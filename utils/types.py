@@ -9,7 +9,7 @@ from typing import List, Dict, Any
 class ToolCall:
     id: str
     name: str
-    arguments: Dict[str, Any]
+    arguments: str | Dict[str, Any]
 
 
 @dataclass 
