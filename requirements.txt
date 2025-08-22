@@ -2,3 +2,4 @@ python-dotenv
 anthropic
 pytest
 pytest-asyncio
+aiohttp

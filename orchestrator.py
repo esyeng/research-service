@@ -1,6 +1,9 @@
 import datetime
+import asyncio
+import random
 from typing import List
-from helpers.llmclient import llm_call, extract_json_from_markdown
+from helpers.llmclient import stream_llm_sync, extract_json_from_markdown, llm_call_with_tools
+from helpers.tools import web_search, web_fetch
 from utils.types import (
     SubTask,
     TaskPlan,
@@ -42,13 +45,66 @@ class ResearchOrchestrator:
     def __init__(self):
         self.memory = []
 
+    def _make_web_fetch_tool(self):
+        """Tool for subagents to fetch full webpage content"""
+        return {
+            "name": "web_fetch",
+            "description": "Fetch complete content from a specific URL",
+            "function": web_fetch,
+            "parameters": {
+                "url": {"type": "string", "description": "URL to fetch content from"}
+            },
+        }
+
+    def _make_web_search_tool(self):
+        return {
+            "name": "web_search",
+            "description": "Search the web for information",
+            "function": web_search,
+            "parameters": {
+                "query": {"type": "string", "description": "Search query"},
+                "max_results": {
+                    "type": "integer",
+                    "description": "Max results to return",
+                    "default": 10,
+                },
+            },
+        }
+
+    def _make_run_subagent_tool(self, task_plan: TaskPlan):
+        async def run_subagent(subtask_id: str, custom_instructions: str | None = None):
+            # subagent execution logic here
+            subtask = next(st for st in task_plan.subtasks if st.id == subtask_id)
+
+            # execute subagent
+            result = await self._execute_single_subagent(subtask, custom_instructions)
+            return result
+
+        return {
+            "name": "run_subagent",
+            "description": f"Execute a research subtask. Available subtasks: {[st.id + ': ' + st.objective for st in task_plan.subtasks]}",
+            "function": run_subagent,
+            "parameters": {
+                "subtask_id": {
+                    "type": "string",
+                    "description": "ID of the subtask to execute",
+                    "enum": [st.id for st in task_plan.subtasks],
+                },
+                "custom_instructions": {
+                    "type": "string",
+                    "description": "Additional specific instructions for this subagent",
+                    "required": False,
+                },
+            },
+        }
+
     def _allocate_resources(
         self, task_plan: TaskPlan, orchestrate: bool = False
     ) -> ResourceConfig | str:
         model_choices = {
             "straightforward": "claude-3-5-haiku-20241022",
-            "moderate": "claude-sonnet-4-20250514",
-            "complex": "claude-opus-4-1-20250805",
+            "moderate": "claude-3-7-sonnet-20250219",
+            "complex": "claude-sonnet-4-20250514",
         }
         simp = task_plan.complexity_score == 1
         mid = task_plan.complexity_score == 2
@@ -65,6 +121,20 @@ class ResearchOrchestrator:
             ),
             total_token_budget=8000 if simp else 16000,
             timeout_seconds=60 if simp else 120,
+        )
+
+    def _select_model(self, complexity_score: int = 1):
+        model_choices = {
+            "straightforward": "claude-3-5-haiku-20241022",
+            "moderate": "claude-sonnet-4-20250514",
+            "complex": "claude-opus-4-1-20250805",
+        }
+        simp = complexity_score == 1
+        mid = complexity_score == 2
+        return (
+            model_choices["straightforward"]
+            if simp
+            else model_choices["moderate"] if mid else model_choices["complex"]
         )
 
     def _build_task_plan(self, **kwargs) -> str:
@@ -143,23 +213,25 @@ class ResearchOrchestrator:
     }}
     </delegation_format>
     """
-    # next step here: run allocate_resources on 
+        # next step here: run allocate_resources on
         try:
             return template.format(**kwargs)
         except KeyError as e:
             raise ValueError(f"Missing required prompt variable: {e}")
 
-    def _build_subagent_prompt(self, subtask: SubTask, tools_available: List[str]) -> str:
-        """Build focused subagent prompt using Anthropic's template"""
-    
-        # Adapt the complexity to tool call budget
+    def _build_subagent_prompt(
+        self, subtask: SubTask, tools_available: List[str]
+    ) -> str:
+        """Build focused subagent prompt using template"""
+
+        # adapt complexity to tool call budget
         complexity_to_budget = {
             1: "under 5 tool calls",  # simple
-            2: "5-8 tool calls",      # medium  
-            3: "8-15 tool calls"      # complex
+            2: "5-8 tool calls",  # medium
+            3: "8-15 tool calls",  # complex
         }
-        
-        # This is Anthropic's prompt with your task injected
+
+        # prompt with task injected
         return f"""
         You are a research subagent working as part of a team. The current date is {datetime}. 
 
@@ -178,13 +250,100 @@ class ResearchOrchestrator:
 
     def _estimate_subtask_complexity(self, subtask: SubTask) -> int:
         """Quick heuristic to estimate subtask complexity for budget setting"""
-        # Simple heuristics based on objective length, search focus count, etc.
         if len(subtask.search_focus) <= 2 and len(subtask.objective.split()) <= 10:
             return 1
         elif len(subtask.search_focus) <= 4 and len(subtask.objective.split()) <= 20:
             return 2
         else:
             return 3
+
+    async def _execute_single_subagent(
+        self, subtask: SubTask, custom_instructions: str | None = None
+    ) -> dict:
+        """Execute a single subagent using subagent prompt"""
+
+        subagent_prompt = self._build_subagent_prompt(
+            subtask, tools_available=["web_search", "web_fetch", "complete_task"]
+        )
+
+        # add custom instructions if provided by orchestrator
+        if custom_instructions:
+            subagent_prompt += f"\n\nAdditional instructions from lead researcher: {custom_instructions}"
+
+        # execute subagent with its own tool set
+        subagent_tools = [
+            self._make_web_search_tool(),
+            self._make_web_fetch_tool(),
+            self._make_complete_task_tool(),
+        ]
+
+        try:
+            result = await llm_call_with_tools(
+                prompt=subagent_prompt,
+                tools=subagent_tools,
+                model=self._select_model(
+                    subtask.max_search_calls // 5
+                ),  # Rough complexity
+                timeout=self.SUBAGENT_TIMEOUT,
+            )
+
+            return {
+                "subtask_id": subtask.id,
+                "status": "completed",
+                "findings": result.get("final_response", ""),
+                "tool_calls_used": result.get("tool_calls_count", 0),
+                "raw_conversation": result.get("conversation", []),
+            }
+
+        except asyncio.TimeoutError:
+            return {
+                "subtask_id": subtask.id,
+                "status": "timeout",
+                "findings": "Subagent execution timed out",
+                "tool_calls_used": 0,
+                "error": f"Exceeded {self.SUBAGENT_TIMEOUT}s timeout",
+            }
+        except Exception as e:
+            return {
+                "subtask_id": subtask.id,
+                "status": "error",
+                "findings": "",
+                "tool_calls_used": 0,
+                "error": str(e),
+            }
+
+    def _make_complete_task_tool(self):
+        """Tool for subagents to signal completion"""
+
+        def complete_task(findings: str, sources: List[str], confidence: float = 0.8):
+            return {
+                "task_complete": True,
+                "findings": findings,
+                "sources": sources,
+                "confidence": confidence,
+            }
+
+        return {
+            "name": "complete_task",
+            "description": "Signal that the research subtask is complete",
+            "function": complete_task,
+            "parameters": {
+                "findings": {
+                    "type": "string",
+                    "description": "Summary of research findings",
+                },
+                "sources": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of sources used",
+                },
+                "confidence": {
+                    "type": "number",
+                    "description": "Confidence in findings (0-1)",
+                    "default": 0.8,
+                },
+            },
+        }
 
     def _parse_and_validate(self, raw_response: str | dict) -> TaskPlan:
         """
@@ -245,14 +404,16 @@ class ResearchOrchestrator:
         )
 
     def analyze_query(self, query: str):
-        plan_json = self._build_task_plan(query=query, current_date=datetime.date.today())
-        raw = llm_call(query, plan_json)
+        plan_json = self._build_task_plan(
+            query=query, current_date=datetime.date.today()
+        )
+        raw = stream_llm_sync(query, plan_json)
         return self._parse_and_validate(raw)
-        
-    
+
     async def execute_research(self, query: str) -> dict:
         """Main research flow with orchestrated tool-calling"""
         task_plan = self.analyze_query(query)
+        print(f"task plan!!!!: {task_plan}")
         orchestration_prompt = f"""
         You are a research orchestrator executing this plan:
 
@@ -274,13 +435,36 @@ class ResearchOrchestrator:
 
         Execute the plan now using parallel subagent calls.
         """
-        
+        print(f"orc prompt? {orchestration_prompt}")
+        subagent_tools = [
+            self._make_web_search_tool(),
+            self._make_web_fetch_tool(),
+            self._make_complete_task_tool(),
+        ]
 
+        # This is where the magic happens - LLM manages the flow
+        result = await llm_call_with_tools(
+            orchestration_prompt,
+            tools=subagent_tools,
+            model="claude-opus-4-1-20250805",
+            max_tokens=16000,
+            timeout=600,
+        )
 
-def main():
+        return result
+
+qs = [ "What are the best ways to treat PCOS symptoms besides birth control?", "globally, what are some of the best cities and/or regions for gay US expats right now?", "what tech skills are most going to continue being extremely hireable as AI improves?"]
+
+async def main():
     orchestrator = ResearchOrchestrator()
-    return orchestrator.analyze_query("What are the best ways to treat PCOS symptoms besides birth control?")
+    result = await orchestrator.execute_research(qs[random.randint(0, len(qs) - 1)])
+    if result:
+        print(result)
+        return result
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
+
+
+       

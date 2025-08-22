@@ -2,6 +2,8 @@ import pytest
 import json
 from orchestrator import ResearchOrchestrator
 from utils.types import (
+    TaskPlan,
+    SubTask,
     OrchestratorError,
     TaskDecompositionError,
     SubagentTimeoutError,
@@ -195,6 +197,96 @@ def test_missing_fields_in_response(monkeypatch):
     with pytest.raises(TaskDecompositionError):
         orchestrator.analyze_query("incomplete plan query")
 
+
+def test_resource_allocation():
+    """Ensure orchestrator._allocate_resources() delegates"""
+    plan = TaskPlan(
+        strategy="Break down PCOS treatment into distinct therapeutic categories since PCOS has multiple symptom clusters (metabolic, reproductive, cosmetic) that can be addressed through different non-hormonal approaches",
+        query_type="breadth_first",
+        subtasks=[
+                SubTask(
+                    id="task_001",
+                    objective="Research dietary and nutritional interventions for PCOS management",
+                    search_focus=[
+                        "PCOS diet treatment insulin resistance",
+                        "anti-inflammatory diet PCOS",
+                        "inositol PCOS treatment",
+                        "low glycemic diet PCOS",
+                        "PCOS nutritional supplements evidence"
+                    ],
+                    expected_output="Comprehensive overview of dietary modifications, specific eating patterns, and nutritional supplements with evidence for PCOS symptom improvement",
+                    max_search_calls=5
+                    
+                )
+                {
+                    "id": "task_001",
+                    "objective": "Research dietary and nutritional interventions for PCOS management",
+                    "scope": "Focus on evidence-based dietary approaches, supplements, and nutritional strategies that help manage insulin resistance, weight, and hormonal balance in PCOS patients",
+                    "search_queries": [
+                        "PCOS diet treatment insulin resistance",
+                        "anti-inflammatory diet PCOS",
+                        "inositol PCOS treatment",
+                        "low glycemic diet PCOS",
+                        "PCOS nutritional supplements evidence"
+                    ],
+                    "expected_output": "Comprehensive overview of dietary modifications, specific eating patterns, and nutritional supplements with evidence for PCOS symptom improvement",
+                    "max_searches": 5,
+                    "priority": "high"
+                },
+                {
+                    "id": "task_002",
+                    "objective": "Investigate lifestyle modifications and exercise interventions for PCOS",
+                    "scope": "Research physical activity recommendations, stress management techniques, sleep optimization, and other lifestyle changes that improve PCOS symptoms without medication",
+                    "search_queries": [
+                        "PCOS exercise treatment recommendations",
+                        "resistance training PCOS benefits",
+                        "stress management PCOS",
+                        "sleep PCOS symptoms",
+                        "lifestyle interventions PCOS clinical trials"
+                    ],
+                    "expected_output": "Evidence-based lifestyle modification strategies including specific exercise protocols, stress reduction techniques, and sleep hygiene practices for PCOS management",
+                    "max_searches": 5,
+                    "priority": "high"
+                },
+                {
+                    "id": "task_003",
+                    "objective": "Research alternative and complementary medicine approaches for PCOS",
+                    "scope": "Explore non-pharmaceutical treatments including herbal remedies, acupuncture, mind-body therapies, and other integrative medicine approaches with scientific backing",
+                    "search_queries": [
+                        "herbal treatments PCOS spearmint cinnamon",
+                        "acupuncture PCOS treatment studies",
+                        "yoga meditation PCOS benefits",
+                        "traditional medicine PCOS",
+                        "integrative PCOS treatment approaches"
+                    ],
+                    "expected_output": "Overview of complementary and alternative treatments with evidence for efficacy, safety considerations, and integration with conventional care",
+                    "max_searches": 5,
+                    "priority": "medium"
+                },
+                {
+                    "id": "task_004",
+                    "objective": "Examine medical treatments and procedures for PCOS beyond hormonal contraceptives",
+                    "scope": "Research non-hormonal medications, medical procedures, and other clinical interventions used to treat specific PCOS symptoms like hirsutism, acne, and metabolic dysfunction",
+                    "search_queries": [
+                        "metformin PCOS treatment non-diabetic",
+                        "spironolactone PCOS hirsutism",
+                        "laser hair removal PCOS",
+                        "bariatric surgery PCOS",
+                        "non-hormonal PCOS medications"
+                    ],
+                    "expected_output": "Medical treatment options including medications, procedures, and clinical interventions that don't involve hormonal birth control, with efficacy and safety profiles",
+                    "max_searches": 5,
+                    "priority": "high"
+                }
+            ]
+    )
+
+
+"""
+Complexity 1 → 1 agent, 3-5 searches, haiku
+Complexity 2 → 2-3 agents, 5-10 searches, sonnet
+Complexity 3 → 3-4 agents, 10-15 searches, sonnet
+"""
 
 # **Test Cases:**
 # - Simple factual query → 1-2 subtasks
