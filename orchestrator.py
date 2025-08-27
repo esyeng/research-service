@@ -1,9 +1,15 @@
 import datetime
 import asyncio
 import random
+import json
 from typing import List
-from helpers.llmclient import stream_llm_sync, extract_json_from_markdown, llm_call_with_tools
+from helpers.llmclient import (
+    stream_llm_sync,
+    extract_json_from_markdown,
+    llm_call_with_tools,
+)
 from helpers.tools import web_search, web_fetch
+from prompts.make import plan, pretty
 from utils.types import (
     SubTask,
     TaskPlan,
@@ -38,9 +44,10 @@ class ResearchOrchestrator:
             Main entry point for analyzing a research query, generating a prompt, invoking the LLM, and returning a validated TaskPlan.
     """
 
-    MAX_SUBAGENTS = 4
+    MAX_SUBAGENTS = 5
     MAX_SEARCHES_PER_AGENT = 10
     SUBAGENT_TIMEOUT = 120
+    CONVERSATION_TIMEOUT = 600
 
     def __init__(self):
         self.memory = []
@@ -49,10 +56,13 @@ class ResearchOrchestrator:
         """Tool for subagents to fetch full webpage content"""
         return {
             "name": "web_fetch",
-            "description": "Fetch complete content from a specific URL",
+            "description": "Get complete webpage content from URLs found in search results. Use this after web searches to get detailed information.",
             "function": web_fetch,
             "parameters": {
-                "url": {"type": "string", "description": "URL to fetch content from"}
+                "url": {
+                    "type": "string",
+                    "description": "URL from search results to fetch full content",
+                }
             },
         }
 
@@ -78,6 +88,7 @@ class ResearchOrchestrator:
 
             # execute subagent
             result = await self._execute_single_subagent(subtask, custom_instructions)
+            print(f"ran_subagent on task: {subtask_id}")
             return result
 
         return {
@@ -93,160 +104,43 @@ class ResearchOrchestrator:
                 "custom_instructions": {
                     "type": "string",
                     "description": "Additional specific instructions for this subagent",
-                    "required": False,
+                    # "required": False,
                 },
             },
         }
 
-    def _allocate_resources(
-        self, task_plan: TaskPlan, orchestrate: bool = False
-    ) -> ResourceConfig | str:
-        model_choices = {
-            "straightforward": "claude-3-5-haiku-20241022",
-            "moderate": "claude-3-7-sonnet-20250219",
-            "complex": "claude-sonnet-4-20250514",
+    def _make_complete_task_tool(self):
+        """Tool for subagents to signal completion"""
+
+        def complete_task(findings: str, sources: List[str], confidence: float = 0.8):
+            print(f"running complete_task")
+            return {
+                "task_complete": True,
+                "findings": findings,
+                "sources": sources,
+                "confidence": confidence,
+            }
+
+        return {
+            "name": "complete_task",
+            "description": "FINAL STEP: Provide comprehensive research report synthesizing all findings. Call this when research subtasks have been completed and you have sufficient information to synthesize into a final report.",
+            "function": complete_task,
+            "parameters": {
+                "findings": {
+                    "type": "string",
+                    "description": "Summary of research findings",
+                },
+                "sources": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of sources used",
+                },
+                "confidence": {
+                    "type": "number",
+                    "description": "Confidence in findings (0-1)",
+                },
+            },
         }
-        simp = task_plan.complexity_score == 1
-        mid = task_plan.complexity_score == 2
-        if orchestrate:
-            model_choices["complex"]
-        if task_plan.complexity_score > 3:
-            raise OrchestratorError("Complexity score out of range")
-
-        return ResourceConfig(
-            max_subagents=1 if simp else 3 if mid else 4,
-            searches_per_agent=4 if simp else 7 if mid else 12,
-            model_per_task=(
-                model_choices["straightforward"] if simp else model_choices["moderate"]
-            ),
-            total_token_budget=8000 if simp else 16000,
-            timeout_seconds=60 if simp else 120,
-        )
-
-    def _select_model(self, complexity_score: int = 1):
-        model_choices = {
-            "straightforward": "claude-3-5-haiku-20241022",
-            "moderate": "claude-sonnet-4-20250514",
-            "complex": "claude-opus-4-1-20250805",
-        }
-        simp = complexity_score == 1
-        mid = complexity_score == 2
-        return (
-            model_choices["straightforward"]
-            if simp
-            else model_choices["moderate"] if mid else model_choices["complex"]
-        )
-
-    def _build_task_plan(self, **kwargs) -> str:
-        """
-        Construct the LLM prompt for a given query.
-        Encapsulates the template, instructions, and examples.
-        """
-        # TODO - Determine next step in iterative building:
-        # either
-        # modularize then chunk analysis, allocation, delegation, monitoring, synthesis
-        # orchestrate using tools from master prompt
-        # I think MVP -> modular then stitch
-        # possibly improve efficiency -> master prompt with tooling
-        template = """
-    Purpose: Transform user query into actionable research plan
-    You are an AI research assistant working as a key analyst in a research workflow that handles research queries and evaluates their complexity in order to plan research sub-tasks which will be delegated to sub-agents.
-    The current date is {current_date}
-    Query to analyze:
-    "{query}"
-
-    Instructions:
-    - Categorize query type: straightforward, breadth_first, depth_first
-    - Assign complexity score (1-3)
-    - Generate subtasks (1-4) with clear boundaries, max searches, expected outputs
-    - Ensure zero overlap between subtask scopes
-
-    query types with explanation (enum values) ->
-    1. straightforward: the problem is focused, well-defined, and can be effectively answered by a single focused investigation or fetching a single resource from the internet.\n
-    2. breadth_first: the problem can be broken into distinct, independent sub-questions, and calls for "going wide" by gathering information about each sub-question.\n
-    3. depth_first: the problem requires multiple perspectives on the same issue, and calls for "going deep" by analyzing a single topic from many angles.
-        
-    Examples:
-    - straightforward: "What is the population of Tokyo?"
-    - breadth_first: "Compare the economic systems of three Nordic countries"
-    - depth_first: "Analyze AI finance agent design approaches in 2025"
-    
-
-    * For **straightforward queries**:
-    - Identify the most direct, efficient path to the answer.
-    - Determine whether basic fact-finding or minor analysis is needed.
-    - Specify exact data points or information required to answer.
-    - Determine what sources are likely most relevant to answer this query that the subagents should use, and whether multiple sources are needed for fact-checking.
-    - Plan basic verification methods to ensure the accuracy of the answer.
-    - Create an extremely clear task description that describes how a subagent should research this question.
-
-    * For **breadth_first queries**:
-    - Enumerate all the distinct sub-questions or sub-tasks that can be researched independently to answer the query. 
-    - Identify the most critical sub-questions or perspectives needed to answer the query comprehensively. Only create additional sub-tasks if the query has clearly distinct components that cannot be efficiently handled by fewer sub-agents
-    - Prioritize these sub-tasks based on their importance and expected research complexity.
-    - Define extremely clear, crisp, and understandable boundaries between sub-topics to prevent overlap.
-    - Plan how findings will be aggregated into a coherent whole.
-
-    * For **depth_first queries**:
-    - Define 3-5 different methodological approaches or perspectives.
-    - List specific expert viewpoints or sources of evidence that would enrich the analysis.
-    - Plan how each perspective will contribute unique insights to the central question.
-    - Specify how findings from different approaches will be synthesized.
-
-    <delegation_format>
-    Output your plan as JSON:
-    {{
-        "query_type": "straightforward|breadth_first|depth_first",
-        "complexity": 1-3,
-        "strategy": "Brief explanation of approach",
-        "subtasks": [
-            {{
-                "id": "task_001",
-                "objective": "Specific research goal",
-                "scope": "Clear boundaries of what to research",
-                "search_queries": ["suggested", "search", "terms"],
-                "expected_output": "What success looks like",
-                "max_searches": 5,
-                "priority": "high|medium|low"
-            }}
-        ]
-    }}
-    </delegation_format>
-    """
-        # next step here: run allocate_resources on
-        try:
-            return template.format(**kwargs)
-        except KeyError as e:
-            raise ValueError(f"Missing required prompt variable: {e}")
-
-    def _build_subagent_prompt(
-        self, subtask: SubTask, tools_available: List[str]
-    ) -> str:
-        """Build focused subagent prompt using template"""
-
-        # adapt complexity to tool call budget
-        complexity_to_budget = {
-            1: "under 5 tool calls",  # simple
-            2: "5-8 tool calls",  # medium
-            3: "8-15 tool calls",  # complex
-        }
-
-        # prompt with task injected
-        return f"""
-        You are a research subagent working as part of a team. The current date is {datetime}. 
-
-        <task>
-        Objective: {subtask.objective}
-        Expected Output: {subtask.expected_output}
-        Suggested Starting Points: {subtask.search_focus}
-        Research Budget: {complexity_to_budget.get(self._estimate_subtask_complexity(subtask), "5-8 tool calls")}
-        Maximum Tool Calls: {subtask.max_search_calls}
-        </task>
-
-            {research_subagent_prompt}  # The full prompt you provided
-
-        Available tools: {", ".join(tools_available)}
-        """
 
     def _estimate_subtask_complexity(self, subtask: SubTask) -> int:
         """Quick heuristic to estimate subtask complexity for budget setting"""
@@ -257,10 +151,76 @@ class ResearchOrchestrator:
         else:
             return 3
 
+    def _select_model(self, complexity_score: int = 1):
+        model_choices = {
+            "straightforward": "claude-3-5-haiku-20241022",
+            "moderate": "claude-3-7-sonnet-20250219",
+            "complex": "claude-sonnet-4-20250514",
+        }
+        simp = complexity_score == 1
+        mid = complexity_score == 2
+        return (
+            model_choices["straightforward"]
+            if simp
+            else model_choices["moderate"] if mid else model_choices["complex"]
+        )
+
+    def _allocate_resources(self, task_plan: TaskPlan) -> ResourceConfig:
+        model_choices = {
+            "straightforward": "claude-3-5-haiku-20241022",
+            "moderate": "claude-3-7-sonnet-20250219",
+            "complex": "claude-sonnet-4-20250514",
+        }
+        simp = task_plan.complexity_score == 1
+        mid = task_plan.complexity_score == 2
+        if task_plan.complexity_score > 3:
+            raise OrchestratorError("Complexity score out of range")
+
+        return ResourceConfig(
+            max_subagents=1 if simp else 3 if mid else 4,
+            searches_per_agent=4 if simp else 7 if mid else 12,
+            model_per_task=(
+                model_choices["straightforward"] if simp else model_choices["moderate"]
+            ),
+            total_token_budget=12000 if simp else 16000,
+            timeout_seconds=60 if simp else 120,
+        )
+
+    def _build_subagent_prompt(
+        self, subtask: SubTask, tools_available: List[str]
+    ) -> str:
+        """Build focused subagent prompt using template"""
+
+        # adapt complexity to tool call budget
+        complexity_to_budget = {
+            1: "under 3 tool calls",  # simple
+            2: "3-7 tool calls",  # medium
+            3: "8-11 tool calls",  # complex
+        }
+        today = datetime.date.today().isoformat()
+
+        # prompt with task injected
+        return f"""
+        You are a research subagent working as part of a team. The current date is {today}. 
+
+        <task>
+        Objective: {subtask.objective}
+        Expected Output: {subtask.expected_output}
+        Suggested Starting Points: {subtask.search_focus}
+        Research Budget: {complexity_to_budget.get(self._estimate_subtask_complexity(subtask), "3-7 tool calls")}
+        </task>
+
+            {research_subagent_prompt} 
+
+        Available tools: {", ".join(tools_available)}
+        Exexute your task using the tools you have access to, 
+        """
+
     async def _execute_single_subagent(
         self, subtask: SubTask, custom_instructions: str | None = None
     ) -> dict:
         """Execute a single subagent using subagent prompt"""
+        print(f"executing single subagent on task: {subtask.id} -> {subtask.objective}")
 
         subagent_prompt = self._build_subagent_prompt(
             subtask, tools_available=["web_search", "web_fetch", "complete_task"]
@@ -285,6 +245,7 @@ class ResearchOrchestrator:
                     subtask.max_search_calls // 5
                 ),  # Rough complexity
                 timeout=self.SUBAGENT_TIMEOUT,
+                conversation_timeout=self.CONVERSATION_TIMEOUT
             )
 
             return {
@@ -311,39 +272,6 @@ class ResearchOrchestrator:
                 "tool_calls_used": 0,
                 "error": str(e),
             }
-
-    def _make_complete_task_tool(self):
-        """Tool for subagents to signal completion"""
-
-        def complete_task(findings: str, sources: List[str], confidence: float = 0.8):
-            return {
-                "task_complete": True,
-                "findings": findings,
-                "sources": sources,
-                "confidence": confidence,
-            }
-
-        return {
-            "name": "complete_task",
-            "description": "Signal that the research subtask is complete",
-            "function": complete_task,
-            "parameters": {
-                "findings": {
-                    "type": "string",
-                    "description": "Summary of research findings",
-                },
-                "sources": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "List of sources used",
-                },
-                "confidence": {
-                    "type": "number",
-                    "description": "Confidence in findings (0-1)",
-                    "default": 0.8,
-                },
-            },
-        }
 
     def _parse_and_validate(self, raw_response: str | dict) -> TaskPlan:
         """
@@ -404,67 +332,120 @@ class ResearchOrchestrator:
         )
 
     def analyze_query(self, query: str):
-        plan_json = self._build_task_plan(
-            query=query, current_date=datetime.date.today()
-        )
+        plan_json = plan(query=query, current_date=datetime.date.today())
         raw = stream_llm_sync(query, plan_json)
         return self._parse_and_validate(raw)
 
     async def execute_research(self, query: str) -> dict:
         """Main research flow with orchestrated tool-calling"""
         task_plan = self.analyze_query(query)
-        print(f"task plan!!!!: {task_plan}")
+        resource_config = self._allocate_resources(task_plan)
+        spec = f"""
+        - Max Subagents: {resource_config.max_subagents}
+        - Searches Per Agent: {resource_config.searches_per_agent}
+        - Model Per Task: {resource_config.model_per_task}
+        """
+        print(f"spec: {spec}")
         orchestration_prompt = f"""
-        You are a research orchestrator executing this plan:
+        You are an AI research orchestrator armed with a team of subagent researchers. You are tasked with executing the following research plan for the provided query:
 
         Original Query: {query}
         Strategy: {task_plan.strategy}
         Query Type: {task_plan.query_type}
         Subtasks: {len(task_plan.subtasks)} parallel tasks
+        Subagent specifications: {spec}
 
         Your job:
         1. Use run_subagent tool for each subtask in parallel
-        2. Monitor progress and handle any failures
-        3. Synthesize all results into a comprehensive report
-        4. Use complete_research when done
+        2. Monitor progress and wait for all subtasks to complete
+        3. Synthesize all subtask results into a comprehensive report
+        4. Use complete_task when done
 
         Key constraints from planning:
         - Maximum {len(task_plan.subtasks)} subagents
         - Each subtask has specific boundaries to prevent overlap
-        - Stop research when you have sufficient information
 
-        Execute the plan now using parallel subagent calls.
+        Execute the plan now using parallel subagent calls. Keep going until you are ready to report your findings, at which point you will use complete_task, passing in all of your findings, sources, and confidence scores.
+        
+        CRITICAL CHECKLIST - Complete ALL items:
+        □ Run subagents for each subtask  
+        □ each subagent should:
+            □ Get search results
+            □ Use web_fetch on 3-5 most promising URLs from search results
+            □ Use complete_task, returning findings, sources, and confidence_score
+        □ Use complete_task using all subagent complete_task results to generate comprehensive synthesis
+        
+        <important_guidelines>
+        In communicating with subagents, maintain extremely high information density while being concise - describe everything needed in the fewest words possible.
+        As you progress through the search process:
+        1. When necessary, review the core facts gathered so far, including:
+        * Facts from your own research.
+        * Facts reported by subagents.
+        * Specific dates, numbers, and quantifiable data.
+        2. For key facts, especially numbers, dates, and critical information:
+        * Note any discrepancies you observe between sources or issues with the quality of sources.
+        * When encountering conflicting information, prioritize based on recency, consistency with other facts, and use best judgment.
+        3. Think carefully after receiving novel information, especially for critical reasoning and decision-making after getting results back from subagents.
+        4. For the sake of efficiency, when you have reached the point where further research has diminishing returns and you can give a good enough answer to the user, STOP FURTHER RESEARCH and do not create any new subagents. Just write your final report at this point. Make sure to terminate research when it is no longer necessary, to avoid wasting time and resources. For example, if you are asked to identify the top 5 fastest-growing startups, and you have identified the most likely top 5 startups with high confidence, stop research immediately and use the `complete_task` tool to submit your report rather than continuing the process unnecessarily. 
+        5. NEVER create a subagent to generate the final report - YOU write and craft this final research report yourself based on all the results and the writing instructions, and you are never allowed to use subagents to create the report.
+        </important_guidelines>
+
         """
-        print(f"orc prompt? {orchestration_prompt}")
+        # print(f"orc prompt? {orchestration_prompt}")
         subagent_tools = [
-            self._make_web_search_tool(),
-            self._make_web_fetch_tool(),
             self._make_complete_task_tool(),
+            self._make_run_subagent_tool(task_plan),
         ]
 
         # This is where the magic happens - LLM manages the flow
         result = await llm_call_with_tools(
             orchestration_prompt,
             tools=subagent_tools,
-            model="claude-opus-4-1-20250805",
+            model="claude-sonnet-4-20250514",
             max_tokens=16000,
             timeout=600,
         )
-
+        # claude-sonnet-4-20250514
+        # claude-opus-4-1-20250805
         return result
 
-qs = [ "What are the best ways to treat PCOS symptoms besides birth control?", "globally, what are some of the best cities and/or regions for gay US expats right now?", "what tech skills are most going to continue being extremely hireable as AI improves?"]
+
+qs = [
+    # "What are the best ways to treat PCOS symptoms besides birth control?",
+    "globally, what are some of the best cities and/or regions for lesbian US expats right now?",
+    # "what tech skills are most going to continue being extremely hireable as AI improves?",
+    # "What are some low-overhead side-business ideas for a busy grad student looking to generate passive income?",
+]
+
 
 async def main():
     orchestrator = ResearchOrchestrator()
     result = await orchestrator.execute_research(qs[random.randint(0, len(qs) - 1)])
     if result:
-        print(result)
+        with open("output.txt", "w") as f:
+            for entry in result:
+                # if entry == "final_response":
+                #     if isinstance(entry, (dict, object, json)):
+                #         d = json.loads(result[entry])
+                #         for k in d:
+                #             if k == "subtask_id" or k == "status":
+                #                 f.write(f"{k}:{d[k]}\n")
+                if entry == "tool_calls_count":
+                    f.write(f"Tool Calls Count: {result[entry]}\n")
+                if entry == "error":
+                    f.write(f"Error Message: {result[entry]}\n")
+                if entry == "conversation":
+                    for item in result[entry]:
+                        f.writelines(
+                            [
+                                f"conversation length: {len(result[entry])}\nlast message -> role: {result[entry][-1]['role']}, content -> {result[entry][-1]['content']} \n",
+                                f"{str(item) if not isinstance(item, str) else item}\n",
+                            ]
+                        )
+
+        # pretty(result["final_response"])
         return result
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-       
