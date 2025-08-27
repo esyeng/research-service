@@ -8,13 +8,13 @@ from typing import List, Dict, Any
 @dataclass
 class ToolCall:
     id: str
+    type: str
     name: str
-    arguments: str | Dict[str, Any]
-
+    input: str | Dict[str, Any] | object
 
 @dataclass 
 class ToolResult:
-    tool_call_id: str
+    tool_use_id: str
     content: Any
     error: str | None = None
 
@@ -42,8 +42,8 @@ class ResourceConfig:
     max_subagents: int
     searches_per_agent: int
     model_per_task: str = "claude-sonnet-4-20250514"
-    total_token_budget: int = 0
-    timeout_seconds: int = 0
+    total_token_budget: int = 16000
+    timeout_seconds: int = 120
 
 
 @dataclass

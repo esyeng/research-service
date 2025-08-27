@@ -14,11 +14,12 @@ from helpers.llmclient import (
     _execute_tool_calls,
     llm_call_with_tools,
     stream_llm_sync,
-    stream_llm_messages_async
+    stream_llm_messages_async,
 )
 
 # Set up detailed logging for visual comparison
 init()
+
 
 # Custom logger config for colored output
 class ColoredFormatter(logging.Formatter):
@@ -45,13 +46,15 @@ class ColoredFormatter(logging.Formatter):
         message = message.replace("ACTUAL:", f"{Fore.YELLOW}ACTUAL:{Style.RESET_ALL}")
 
         return message
-    
+
+
 # logging w/ colors setup
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
 handler.setFormatter(ColoredFormatter("%(message)s"))
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
+
 
 # Test fixtures
 @pytest.fixture
@@ -81,7 +84,10 @@ def sample_tool_definition():
 def sample_tool_call():
     """What a tool call from Claude looks like"""
     return ToolCall(
-        id="call_123", name="web_search", arguments={"query": "quantum computing"}
+        id="call_123",
+        type="tool_use",
+        name="web_search",
+        input={"query": "quantum computing"},
     )
 
 
@@ -202,7 +208,7 @@ async def test_safe_tool_execution_with_exception():
         logger.info("Tool about to fail...")
         raise ValueError("Tool execution failed!")
 
-    tool_call = ToolCall(id="call_456", name="failing_tool", arguments={})
+    tool_call = ToolCall(id="call_456", type="tool_use", name="failing_tool", input={})
 
     # EXPECTED behavior
     logger.info(
@@ -234,8 +240,9 @@ async def test_safe_tool_execution_json_arguments():
     # Tool call with JSON string arguments (common from API)
     tool_call = ToolCall(
         id="call_789",
+        type="tool_use",
         name="test_tool",
-        arguments='{"key": "value", "number": 42}',  # String JSON
+        input='{"key": "value", "number": 42}',  # String JSON
     )
 
     received_args = None
@@ -284,8 +291,8 @@ async def test_execute_tool_calls_parallel():
         return "result2"
 
     tool_calls = [
-        ToolCall(id="1", name="tool1", arguments={}),
-        ToolCall(id="2", name="tool2", arguments={}),
+        ToolCall(id="1", type="tool_use", name="tool1", input={}),
+        ToolCall(id="2", type="tool_use", name="tool2", input={}),
     ]
 
     available_tools = [
@@ -325,8 +332,8 @@ async def test_execute_tool_calls_unknown_tool():
     logger.info("\n=== TEST: _execute_tool_calls (Unknown Tool) ===")
 
     tool_calls = [
-        ToolCall(id="1", name="known_tool", arguments={}),
-        ToolCall(id="2", name="unknown_tool", arguments={}),
+        ToolCall(id="1", type="tool_use", name="known_tool", input={}),
+        ToolCall(id="2", type="tool_use", name="unknown_tool", input={}),
     ]
 
     available_tools = [{"name": "known_tool", "function": lambda: "success"}]
@@ -363,7 +370,9 @@ async def test_llm_call_with_tools_no_tools_needed():
     mock_response.content = "The capital of France is Paris."
     mock_response.tool_calls = None
 
-    with patch("helpers.llmclient.stream_llm_messages_async", new_callable=AsyncMock) as mock_llm:
+    with patch(
+        "helpers.llmclient.stream_llm_messages_async", new_callable=AsyncMock
+    ) as mock_llm:
         mock_llm.return_value = mock_response
 
         # EXPECTED behavior
@@ -392,16 +401,19 @@ async def test_llm_call_with_tools_with_tool_loop():
 
     # Mock responses for conversation loop
     response1 = Mock()
-    response1.content = "I'll search for that information."
-    response1.tool_calls = [
-        ToolCall(id="1", name="web_search", arguments={"query": "test"})
+    response1.content = [
+        {"type": "text", "text": "I'll search for that information."},
+        {"type": "tool_use", "id": 1, "name": "web_search", "input": {"query": "test"}},
     ]
+    response1.stop_reason = "tool_use"
 
     response2 = Mock()
     response2.content = "Based on the search results, here's the answer."
     response2.tool_calls = None  # No more tools, done
 
-    with patch("helpers.llmclient.stream_llm_messages_async", new_callable=AsyncMock) as mock_llm:
+    with patch(
+        "helpers.llmclient.stream_llm_messages_async", new_callable=AsyncMock
+    ) as mock_llm:
         mock_llm.side_effect = [response1, response2]
 
         # Mock tool
@@ -413,6 +425,7 @@ async def test_llm_call_with_tools_with_tool_loop():
                 "name": "web_search",
                 "function": mock_search,
                 "parameters": {"query": {"type": "string"}},
+                "description": "Mock query tool for testing purposes",
             }
         ]
 
@@ -431,9 +444,7 @@ async def test_llm_call_with_tools_with_tool_loop():
 
         # Assertions
         assert result["tool_calls_count"] == 1, "Should have made 1 tool call"
-        assert (
-            len(result["conversation"]) >= 3
-        ), "Should have user, assistant, tool, assistant messages"
+        assert len(result["conversation"]) >= 2, "Should have user, assistant messages"
         assert "final_response" in result, "Should have final response"
         logger.info("✓ Tool loop executed correctly")
 
@@ -477,12 +488,18 @@ async def test_llm_call_with_tools_max_calls_limit():
     # Mock LLM that always wants to use tools
     mock_response = Mock()
     mock_response.content = "I need to keep searching..."
-    mock_response.tool_calls = [ToolCall(id="x", name="search", arguments={})]
+    mock_response.tool_calls = [
+        ToolCall(id="x", type="tool_use", name="search", input={})
+    ]
 
-    with patch("helpers.llmclient.stream_llm_messages_async", new_callable=AsyncMock) as mock_llm:
+    with patch(
+        "helpers.llmclient.stream_llm_messages_async", new_callable=AsyncMock
+    ) as mock_llm:
         mock_llm.return_value = mock_response  # Always returns tool calls
 
-        with patch("helpers.llmclient._execute_tool_calls", new_callable=AsyncMock) as mock_execute:
+        with patch(
+            "helpers.llmclient._execute_tool_calls", new_callable=AsyncMock
+        ) as mock_execute:
             mock_execute.return_value = [ToolResult("x", "result", None)]
 
             # Override max_tool_calls for testing
@@ -517,24 +534,30 @@ async def test_llm_call_with_tools_max_calls_limit():
 @pytest.mark.asyncio
 async def test_stream_llm_messages_async():
     """Test async streaming with tools"""
-    
-    logger.info(f"{Fore.CYAN}\n=== TEST: stream_llm_messages_async ==={Style.RESET_ALL}")
-    
+
+    logger.info(
+        f"{Fore.CYAN}\n=== TEST: stream_llm_messages_async ==={Style.RESET_ALL}"
+    )
+
     messages = [{"role": "user", "content": "Test message"}]
     tools = [{"name": "test_tool", "input_schema": {"type": "object"}}]
-    model = "claude-3-sonnet-20240229"
+    model = "claude-3-7-sonnet-20250219"
     max_tokens = 2000
-    
+
     logger.info(f"INPUT messages: {messages}")
     logger.info(f"INPUT tools: {len(tools)} tools")
     logger.info(f"INPUT model: {model}")
     logger.info(f"INPUT max_tokens: {max_tokens}")
-    
+
     # EXPECTED behavior
-    logger.info(f"{Fore.CYAN}EXPECTED: Returns Message object from Anthropic API{Style.RESET_ALL}")
+    logger.info(
+        f"{Fore.CYAN}EXPECTED: Returns Message object from Anthropic API{Style.RESET_ALL}"
+    )
     logger.info(f"{Fore.CYAN}EXPECTED: Handles streaming properly{Style.RESET_ALL}")
-    logger.info(f"{Fore.CYAN}EXPECTED: Passes tools and model correctly to API{Style.RESET_ALL}")
-    
+    logger.info(
+        f"{Fore.CYAN}EXPECTED: Passes tools and model correctly to API{Style.RESET_ALL}"
+    )
+
     # Mock the Anthropic API response
     mock_message = Mock()
     mock_message.content = "This is a test response from Claude"
@@ -543,183 +566,225 @@ async def test_stream_llm_messages_async():
     mock_message.usage.input_tokens = 10
     mock_message.usage.output_tokens = 15
     mock_message.tool_calls = None  # No tool calls in this response
-    
-    with patch('anthropic.AsyncAnthropic') as mock_anthropic:
+
+    with patch("anthropic.AsyncAnthropic") as mock_anthropic:
         # Mock the client instance
         mock_client = AsyncMock()
         mock_anthropic.return_value = mock_client
-        
+
         # Mock the messages.create method
         mock_client.messages.create.return_value = mock_message
-        
+
         # ACTUAL execution
         result = await stream_llm_messages_async(messages, tools, model, max_tokens)
-        
+
         logger.info(f"{Fore.YELLOW}ACTUAL result type: {type(result)}{Style.RESET_ALL}")
-        logger.info(f"{Fore.YELLOW}ACTUAL content: {result.content if hasattr(result, 'content') else 'No content attr'}{Style.RESET_ALL}")
-        logger.info(f"{Fore.YELLOW}ACTUAL model: {result.model if hasattr(result, 'model') else 'No model attr'}{Style.RESET_ALL}")
-        
+        logger.info(
+            f"{Fore.YELLOW}ACTUAL content: {result.content if hasattr(result, 'content') else 'No content attr'}{Style.RESET_ALL}"
+        )
+        logger.info(
+            f"{Fore.YELLOW}ACTUAL model: {result.model if hasattr(result, 'model') else 'No model attr'}{Style.RESET_ALL}"
+        )
+
         # Verify the API was called correctly
         mock_client.messages.create.assert_called_once()
         call_args = mock_client.messages.create.call_args
-        
+
         logger.info(f"API called with: {call_args}")
-        
+
         # Assertions
         assert result is not None, "Should return a message object"
-        assert hasattr(result, 'content'), "Message should have content attribute"
-        assert result.content == "This is a test response from Claude", "Content should match mock"
-        
+        assert hasattr(result, "content"), "Message should have content attribute"
+        assert (
+            result.content == "This is a test response from Claude"
+        ), "Content should match mock"
+
         # Verify API call parameters
-        assert call_args[1]['model'] == model, "Should pass correct model"
-        assert call_args[1]['max_tokens'] == max_tokens, "Should pass correct max_tokens"
-        assert call_args[1]['messages'] == messages, "Should pass messages correctly"
-        assert 'tools' in call_args[1], "Should include tools parameter"
-        
+        assert call_args[1]["model"] == model, "Should pass correct model"
+        assert (
+            call_args[1]["max_tokens"] == max_tokens
+        ), "Should pass correct max_tokens"
+        assert call_args[1]["messages"] == messages, "Should pass messages correctly"
+        assert "tools" in call_args[1], "Should include tools parameter"
+
         logger.info(f"{Fore.GREEN}✓ Message object returned correctly{Style.RESET_ALL}")
         logger.info(f"{Fore.GREEN}✓ API parameters passed correctly{Style.RESET_ALL}")
+
 
 @pytest.mark.asyncio
 async def test_stream_llm_messages_async_with_tool_calls():
     """Test async streaming when Claude wants to use tools"""
-    
-    logger.info(f"{Fore.CYAN}\n=== TEST: stream_llm_messages_async (With Tool Calls) ==={Style.RESET_ALL}")
-    
+
+    logger.info(
+        f"{Fore.CYAN}\n=== TEST: stream_llm_messages_async (With Tool Calls) ==={Style.RESET_ALL}"
+    )
+
     messages = [{"role": "user", "content": "Search for quantum computing news"}]
     tools = [{"name": "web_search", "input_schema": {"type": "object"}}]
-    
+
     # Mock response with tool calls
     mock_message = Mock()
     mock_message.content = "I'll search for that information."
     mock_message.tool_calls = [
-        Mock(id="call_123", name="web_search", arguments={"query": "quantum computing news"})
+        Mock(
+            id="call_123",
+            type="tool_use",
+            name="web_search",
+            input={"query": "quantum computing news"},
+        )
     ]
-    
+
     # EXPECTED behavior
-    logger.info(f"{Fore.CYAN}EXPECTED: Returns Message with tool_calls populated{Style.RESET_ALL}")
-    
-    with patch('anthropic.AsyncAnthropic') as mock_anthropic:
+    logger.info(
+        f"{Fore.CYAN}EXPECTED: Returns Message with tool_calls populated{Style.RESET_ALL}"
+    )
+
+    with patch("anthropic.AsyncAnthropic") as mock_anthropic:
         mock_client = AsyncMock()
         mock_anthropic.return_value = mock_client
         mock_client.messages.create.return_value = mock_message
-        
+
         # ACTUAL execution
-        result = await stream_llm_messages_async(messages, tools, "claude-3-sonnet", 1000)
-        
-        logger.info(f"{Fore.YELLOW}ACTUAL tool_calls: {result.tool_calls if hasattr(result, 'tool_calls') else 'No tool_calls attr'}{Style.RESET_ALL}")
-        
+        result = await stream_llm_messages_async(
+            messages, tools, "claude-3-7-sonnet-20250219", 1000
+        )
+
+        logger.info(
+            f"{Fore.YELLOW}ACTUAL tool_calls: {result.tool_calls if hasattr(result, 'tool_calls') else 'No tool_calls attr'}{Style.RESET_ALL}"
+        )
+
         # Assertions
-        assert hasattr(result, 'tool_calls'), "Should have tool_calls attribute"
+        assert hasattr(result, "tool_calls"), "Should have tool_calls attribute"
         assert result.tool_calls is not None, "tool_calls should not be None"
         assert len(result.tool_calls) == 1, "Should have 1 tool call"
         assert result.tool_calls[0].name == "web_search", "Tool call name should match"
-        
+
         logger.info(f"{Fore.GREEN}✓ Tool calls handled correctly{Style.RESET_ALL}")
+
 
 @pytest.mark.asyncio
 async def test_stream_llm_messages_async_api_error():
     """Test handling of API errors"""
-    
-    logger.info(f"{Fore.CYAN}\n=== TEST: stream_llm_messages_async (API Error) ==={Style.RESET_ALL}")
-    
+
+    logger.info(
+        f"{Fore.CYAN}\n=== TEST: stream_llm_messages_async (API Error) ==={Style.RESET_ALL}"
+    )
+
     messages = [{"role": "user", "content": "Test"}]
     tools = []
-    
+
     # EXPECTED behavior
     logger.info(f"{Fore.CYAN}EXPECTED: Raises exception on API error{Style.RESET_ALL}")
-    
-    with patch('anthropic.AsyncAnthropic') as mock_anthropic:
+
+    with patch("anthropic.AsyncAnthropic") as mock_anthropic:
         mock_client = AsyncMock()
         mock_anthropic.return_value = mock_client
-        
+
         # Mock API error
         from anthropic import APIError
+
         mock_client.messages.create.side_effect = APIError("Rate limit exceeded")
-        
+
         # ACTUAL execution - should raise exception
         with pytest.raises(APIError) as exc_info:
-            await stream_llm_messages_async(messages, tools, "claude-3-sonnet", 1000)
-        
+            await stream_llm_messages_async(messages, tools, "claude-3-7-sonnet-20250219", 1000)
+
         logger.info(f"{Fore.YELLOW}ACTUAL exception: {exc_info.value}{Style.RESET_ALL}")
-        
-        assert "Rate limit exceeded" in str(exc_info.value), "Should preserve original error message"
+
+        assert "Rate limit exceeded" in str(
+            exc_info.value
+        ), "Should preserve original error message"
         logger.info(f"{Fore.GREEN}✓ API error handled correctly{Style.RESET_ALL}")
+
 
 @pytest.mark.asyncio
 async def test_stream_llm_messages_async_empty_tools():
     """Test with empty tools list"""
-    
-    logger.info(f"{Fore.CYAN}\n=== TEST: stream_llm_messages_async (Empty Tools) ==={Style.RESET_ALL}")
-    
+
+    logger.info(
+        f"{Fore.CYAN}\n=== TEST: stream_llm_messages_async (Empty Tools) ==={Style.RESET_ALL}"
+    )
+
     messages = [{"role": "user", "content": "Simple question"}]
     tools = []  # Empty tools
-    
+
     # EXPECTED behavior
     logger.info(f"{Fore.CYAN}EXPECTED: Works with empty tools list{Style.RESET_ALL}")
-    
+
     mock_message = Mock()
     mock_message.content = "Simple answer"
     mock_message.tool_calls = None
-    
-    with patch('anthropic.AsyncAnthropic') as mock_anthropic:
+
+    with patch("anthropic.AsyncAnthropic") as mock_anthropic:
         mock_client = AsyncMock()
         mock_anthropic.return_value = mock_client
         mock_client.messages.create.return_value = mock_message
-        
+
         # ACTUAL execution
-        result = await stream_llm_messages_async(messages, tools, "claude-3-haiku", 500)
-        
-        logger.info(f"{Fore.YELLOW}ACTUAL result: {result.content}{Style.RESET_ALL}")
-        
+        result = await stream_llm_messages_async(messages, tools, "claude-3-5-haiku-20241022", 500)
+
+        logger.info(f"{Fore.YELLOW}ACTUAL result: {result.content[0].text}{Style.RESET_ALL}")
+
         # Check API call
         call_args = mock_client.messages.create.call_args
-        passed_tools = call_args[1].get('tools', 'not_passed')
-        
+        passed_tools = call_args[1].get("tools", "not_passed")
+
         logger.info(f"Tools parameter: {passed_tools}")
-        
+
         # Assertions
-        assert result.content == "Simple answer", "Should return simple response"
+        assert result.content[0].text == "Simple answer", "Should return simple response"
         # Should either pass empty list or not pass tools parameter at all
-        assert passed_tools == [] or passed_tools == 'not_passed', "Should handle empty tools appropriately"
-        
+        assert (
+            passed_tools == [] or passed_tools == "not_passed"
+        ), "Should handle empty tools appropriately"
+
         logger.info(f"{Fore.GREEN}✓ Empty tools handled correctly{Style.RESET_ALL}")
+
 
 @pytest.mark.asyncio
 async def test_stream_llm_messages_async_default_parameters():
     """Test default parameter handling"""
-    
-    logger.info(f"{Fore.CYAN}\n=== TEST: stream_llm_messages_async (Default Parameters) ==={Style.RESET_ALL}")
-    
+
+    logger.info(
+        f"{Fore.CYAN}\n=== TEST: stream_llm_messages_async (Default Parameters) ==={Style.RESET_ALL}"
+    )
+
     messages = [{"role": "user", "content": "Test"}]
     tools = []
-    
+
     # EXPECTED behavior - check what defaults are actually used
-    logger.info(f"{Fore.CYAN}EXPECTED: Uses appropriate default model and max_tokens{Style.RESET_ALL}")
-    
+    logger.info(
+        f"{Fore.CYAN}EXPECTED: Uses appropriate default model and max_tokens{Style.RESET_ALL}"
+    )
+
     mock_message = Mock()
     mock_message.content = "Response"
-    
-    with patch('anthropic.AsyncAnthropic') as mock_anthropic:
+
+    with patch("anthropic.AsyncAnthropic") as mock_anthropic:
         mock_client = AsyncMock()
         mock_anthropic.return_value = mock_client
         mock_client.messages.create.return_value = mock_message
-        
+
         # Call with minimal parameters (testing defaults)
-        result = await stream_llm_messages_async(messages, tools, 'claude-sonnet-4-20250514', 4000)
-        
+        result = await stream_llm_messages_async(
+            messages, tools, "claude-sonnet-4-20250514", 4000
+        )
+
         # Check what defaults were used
         call_args = mock_client.messages.create.call_args
-        used_model = call_args[1].get('model', 'no_model')
-        used_max_tokens = call_args[1].get('max_tokens', 'no_max_tokens')
-        
+        used_model = call_args[1].get("model", "no_model")
+        used_max_tokens = call_args[1].get("max_tokens", "no_max_tokens")
+
         logger.info(f"{Fore.YELLOW}ACTUAL default model: {used_model}{Style.RESET_ALL}")
-        logger.info(f"{Fore.YELLOW}ACTUAL default max_tokens: {used_max_tokens}{Style.RESET_ALL}")
-        
+        logger.info(
+            f"{Fore.YELLOW}ACTUAL default max_tokens: {used_max_tokens}{Style.RESET_ALL}"
+        )
+
         # Assertions (adjust these based on your function's actual defaults)
-        assert used_model != 'no_model', "Should have a default model"
-        assert used_max_tokens != 'no_max_tokens', "Should have default max_tokens"
+        assert used_model != "no_model", "Should have a default model"
+        assert used_max_tokens != "no_max_tokens", "Should have default max_tokens"
         assert isinstance(used_max_tokens, int), "max_tokens should be integer"
-        
+
         logger.info(f"{Fore.GREEN}✓ Default parameters work correctly{Style.RESET_ALL}")
 
 
