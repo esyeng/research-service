@@ -4,29 +4,18 @@ import json
 import asyncio
 import aiohttp
 import httpx
+import time
 from utils.types import OrchestratorError
 from utils.types import ToolCall, ToolResult
-from typing import List, Dict, Callable
+from typing import List, Dict, Callable, Any, Tuple
 from anthropic import Anthropic, AsyncAnthropic, DefaultAioHttpClient
 from anthropic.types import APIErrorObject, ErrorResponse
-from anthropic.types import Message
+from anthropic.types import Message, ToolUseBlock
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# m = Message(
 
-# )
-# s = StopReason(
-
-# )
-# t = ToolUseBlock(
-
-# )
-# b = ToolResultBlockParam(
-
-
-# )
 def require_env(name: str) -> str:
     v = os.getenv(name)
     if v is None or not v.strip():
@@ -57,7 +46,7 @@ async def _execute_tool_calls(
 ) -> List[ToolResult]:
     """
     Execute tool calls in parallel and return results
-    Args: 
+    Args:
         tool_calls (List)
         available_tools (List[Dict])
     Returns:
@@ -92,7 +81,7 @@ async def _execute_tool_calls(
         if isinstance(result, Exception):
             tool_results.append(
                 ToolResult(
-                    tool_call_id=tool_calls[i].id, content=None, error=str(result)
+                    tool_use_id=tool_calls[i].id, content=None, error=str(result)
                 )
             )
         else:
@@ -109,18 +98,18 @@ async def _safe_tool_execution(
     Args:
         tool_call (ToolCall): @dataclass ToolCall(id: str name: str arguments: Dict[str, Any])
         tool_function (Callable): The callable function to send to the model. Defaults to "".
-       
+
     Returns:
         ToolResult(tool_call_id: str content: Any error: str | None = None)
 
     """
-    
+
     try:
         # Parse arguments
-        if isinstance(tool_call.arguments, str):
-            args = json.loads(tool_call.arguments)
+        if isinstance(tool_call.input, str):
+            args = json.loads(tool_call.input)
         else:
-            args = tool_call.arguments
+            args = tool_call.input
 
         # Execute tool function
         if asyncio.iscoroutinefunction(tool_function):
@@ -128,17 +117,191 @@ async def _safe_tool_execution(
         else:
             result = tool_function(**args)
 
-        return ToolResult(tool_call_id=tool_call.id, content=result)
+        return ToolResult(tool_use_id=tool_call.id, content=result)
     except Exception as e:
-        return ToolResult(tool_call_id=tool_call.id, content=None, error=str(e))
+        return ToolResult(tool_use_id=tool_call.id, content=None, error=str(e))
 
 
-async def _create_error_result(tool_call_id: str, error_msg: str) -> ToolResult:
+async def _create_error_result(tool_use_id: str, error_msg: str) -> ToolResult:
     """Helper to create error results"""
-    return ToolResult(tool_call_id=tool_call_id, content=None, error=error_msg)
+    return ToolResult(tool_use_id=tool_use_id, content=None, error=error_msg)
 
 
-async def stream_llm_messages_async(messages, tools, model, max_tokens) -> Message:
+def _extract_tool_calls_and_text(response) -> Tuple[List[ToolCall], List[Any]]:
+    tool_calls = []
+    text_blocks = []
+    response_blocks = response.content
+    for block in response_blocks:
+        if block.type == "tool_use":
+            tool = ToolCall(
+                id=block.id,
+                type=block.type,
+                name=block.name,
+                input=block.input,
+            )
+            tool_calls.append(tool)
+        elif block.type == "text":
+            text_blocks.append(block.text)
+    return tool_calls, text_blocks
+
+
+def _add_tool_results_to_messages(
+    messages: List[Dict[str, str]], tool_results: List[ToolResult]
+) -> List[Dict[str, str]]:
+    for result in tool_results:
+        if result.error is None:
+            try:
+                content = json.dumps(result.content)
+            except (TypeError, ValueError):
+                # Handle non-serializable objects
+                content = str(result.content)
+        else:
+            content = f"Error: {result.error}"
+        messages.append(
+            {
+                "role": "user",
+                "content": content,
+            }
+        )
+    return messages
+
+
+# MAX_TOOL_CALLS = 20
+
+
+async def llm_call_with_tools(
+    prompt: str,
+    tools: List[Dict],  # Tool definitions
+    model: str = "claude-3-7-sonnet-20250219",
+    max_tokens: int = 4000,
+    timeout: int = 60,  # per-call timeout
+    conversation_timeout: int = 300,  # conversation timeout
+) -> Dict:
+    """
+    Execute LLM with tool calling capability.
+    Handles the conversation loop until LLM signals completion.
+
+    Args:
+        prompt (str): prompt to call model with
+        tools (List[Dict]): tool definitions
+        model (str)
+        max_tokens (int)
+        timeout (int)
+    Returns:
+        Dict - final message to user with results and indicator of finishing
+
+    """
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        prompt
+                        if isinstance(prompt, str)
+                        else (
+                            json.dumps(prompt)
+                            if isinstance(prompt, dict)
+                            else str(prompt) + "..."
+                        )
+                    ),
+                    "cache_control": {"type": "ephemeral"},  # cache main prompt
+                }
+            ],
+        }
+    ]
+    formatted_tools = (
+        [_convert_tool_definition(tool) for tool in tools] if len(tools) > 0 else []
+    )
+    cached_tools = []
+    if formatted_tools:
+        for tool in formatted_tools:
+            cached_tools.append(tool)  # mark last tool for caching
+        if len(cached_tools) > 0:
+            pass
+    tool_calls = []
+    text_blocks = []
+    tool_calls_count = 0
+    max_tool_calls = globals().get("MAX_TOOL_CALLS", 7)
+    conversation_start = time.time()
+    max_iterations = 5
+
+    for i in range(max_iterations):
+        if time.time() - conversation_start > conversation_timeout:
+            return {
+                "final_response": "Conversation timed out",
+                "tool_calls_count": tool_calls_count,
+                "error": "conversation_timeout",
+                "conversation": messages,
+            }
+        try:
+            response = await asyncio.wait_for(
+                stream_llm_messages_async(
+                    messages=messages,
+                    tools=formatted_tools,
+                    model=model,
+                    max_tokens=max_tokens,
+                ),
+                timeout=timeout,
+            )
+            if response and hasattr(response, "stop_reason"):
+                if response.stop_reason == "tool_use":
+                    tool_calls, text_blocks = _extract_tool_calls_and_text(response)
+                    if tool_calls:
+                        tool_results = await _execute_tool_calls(tool_calls, tools)
+                        tool_calls_count += len(tool_calls)
+                        messages = _add_tool_results_to_messages(messages, tool_results)
+                        for text in text_blocks:
+                            messages.append({"role": "assistant", "content": text})
+                        if any(
+                            result.content.get("task_complete")
+                            for result in tool_results
+                        ):
+                            return {
+                                "final_response": (messages, tool_results),
+                                "tool_calls_count": tool_calls_count,
+                                "conversation": messages,
+                            }
+                        continue
+                else:
+                    return {
+                        "final_response": response.content[0].text,
+                        "tool_calls_count": tool_calls_count,
+                        "conversation": messages,
+                    }
+        except asyncio.TimeoutError:
+            return {
+                "final_response": "LLM call timed out",
+                "tool_calls_count": tool_calls_count,
+                "error": "single_call_timeout",
+                "conversation": messages,
+            }
+    return {
+        "final_response": messages[-1]["content"] if messages else "No Response",
+        "tool_calls_count": tool_calls_count,
+        "error": "max_iterations_exceeded",
+        "conversation": messages,
+    }
+
+
+def _print_event(event):
+    if event.type == "text":
+        print(event.text, end="", flush=True)
+    elif event.type == "content_block_stop":
+        print(
+            "\ncontent block finished accumulating:",
+            event.content_block,
+        )
+
+
+async def stream_llm_messages_async(
+    messages: List[Dict],
+    tools: List[Dict] | None = None,
+    model: str = "claude-3-7-sonnet-20250219",
+    max_tokens: int = 4000,
+    extra_headers: Dict | None = None,
+) -> Message | None:
     """
     Call LLM asynchronously, streaming messages with tools
     Args:
@@ -149,34 +312,36 @@ async def stream_llm_messages_async(messages, tools, model, max_tokens) -> Messa
     Returns:
         str: The MesssageStreamManager from the language model.
     """
+    request_params = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": messages,
+    }
+    if tools:
+        request_params["tools"] = tools
+    headers = {}
+    if extra_headers:
+        headers.update(extra_headers)
     try:
         async with AsyncAnthropic(
             api_key=ANTHROPIC_API_KEY, http_client=httpx.AsyncClient()
         ) as client:
-            async with client.messages.stream(
-                model=model,
-                max_tokens=max_tokens,
-                messages=messages,
-                tools=tools,
-            ) as stream:
-                async for event in stream:
-                    if event.type == "text":
-                        print(event.text, end="", flush=True)
-                    elif event.type == "content_block_stop":
-                        print("\ncontent block finished accumulating:", event.content_block)
-            
+            if headers:
+                async with client.messages.stream(
+                    **request_params, extra_headers=headers
+                ) as stream:
+                    async for event in stream:
+                        _print_event(event)
+            else:
+                async with client.messages.stream(**request_params) as stream:
+                    async for event in stream:
+                        _print_event(event)
+
             accumulated = await stream.get_final_message()
             return accumulated
     except OrchestratorError as e:
         print(f"Error in stream_message: {e}")
         return None
-        
-    # return await client.messages.create(
-    #     model=model,
-    #     max_tokens=max_tokens,
-    #     messages=messages,
-    #     tools=tools,
-    # )
 
 
 def stream_llm_sync(
@@ -207,126 +372,12 @@ def stream_llm_sync(
         temperature=0.1,
     ) as stream:
         for event in stream:
-            if event.type == "text":
-                print(event.text, end="", flush=True)
-            elif event.type == "content_block_stop":
-                print()
-                print("\ncontent block finished accumulating:", event.content_block)
+            _print_event(event)
         print()
 
     # gets accumulated final message outside of context manager if consumed inside of the context manager
     accumulated = stream.get_final_message()
-    print("accumulated message: ", accumulated.to_json())
     return accumulated.content[0].text
-
-MAX_TOOL_CALLS = 20
-
-async def llm_call_with_tools(
-    prompt: str,
-    tools: List[Dict],  # Tool definitions
-    model: str = "claude-3-sonnet-20240229",
-    max_tokens: int = 4000,
-    timeout: int = 120,
-) -> Dict:
-    """
-    Execute LLM with tool calling capability.
-    Handles the conversation loop until LLM signals completion.
-    
-    Args: 
-        prompt (str): prompt to call model with
-        tools (List[Dict]): tool definitions
-        model (str)
-        max_tokens (int)
-        timeout (int)
-    Returns: 
-        Dict - final message to user with results and indicator of finishing
-    """
-    final = {}
-    messages = [{"role": "user", "content": prompt}]
-    tool_calls_count = 0
-    max_tool_calls = MAX_TOOL_CALLS
-
-    # Convert tool definitions to Anthropic format
-    formatted_tools = [_convert_tool_definition(tool) for tool in tools]
-
-    while tool_calls_count < max_tool_calls:
-        try:
-            # Call API with formatted tool definitions
-            response = await asyncio.wait_for(
-                stream_llm_messages_async(messages, formatted_tools, model, max_tokens),
-                timeout=timeout,
-            )
-            # print(f"response object, llmclient.py line 199: {response}")
-            print(f"OBJ TYPE, llmclient.py line ~259: {type(response)}")
-            tool_calls_count += 1
-            if response:
-                if (
-                    hasattr(response, "content")
-                    and isinstance(response.content, list)
-                    and len(response.content) > 0
-                ):
-                    assistant_content = response.content[0].text
-
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": assistant_content,
-                        }
-                    )
-                    if (
-                        response.stop_reason == "tool_use"
-                        or response.content[0].type == "tool_use"
-                    ):
-                        tool_calls = response.content
-
-                        # if not tool_calls:
-                        #     final = {
-                        #         "final_response": response.content,
-                        #         "tool_calls_count": tool_calls_count,
-                        #         "conversation": messages,
-                        #     }
-                        if isinstance(tool_calls, list):
-                            # execute tool calls in parallel
-                            tool_results = await _execute_tool_calls(tool_calls, tools)
-                            tool_calls_count += len(tool_calls)
-
-                            # add tool results back to conversation
-                            for result in tool_results:
-                                messages.append(
-                                    {
-                                        "role": "tool",
-                                        "tool_call_id": result.tool_call_id,
-                                        "content": (
-                                            json.dumps(result.content)
-                                            if result.error is None
-                                            else f"Error: {result.error}"
-                                        ),
-                                    }
-                                )
-
-        except asyncio.TimeoutError:
-            return {
-                "final_response": "Tool execution timed out",
-                "tool_calls_count": tool_calls_count,
-                "error": "timeout",
-                "conversation": messages,
-            }
-        except Exception as e:
-            return {
-                "final_response": f"Error during execution: {str(e)}",
-                "tool_calls_count": tool_calls_count,
-                "error": str(e),
-                "conversation": messages,
-            }
-    final = {
-        "final_response": "Reached maximum tool call limit",
-        "tool_calls_count": tool_calls_count,
-        "error": "max_tool_calls_exceeded",
-        "conversation": messages,
-    }
-    print(f"\n\n\n\nhit final message llmclient line 269: {final}\n\n\n\n")
-    # Hit tool call limit
-    return final
 
 
 def extract_xml(text: str, tag: str) -> str:
