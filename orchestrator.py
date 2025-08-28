@@ -12,6 +12,7 @@ from helpers.tools import web_search, web_fetch
 from prompts.make import plan, pretty
 from utils.types import (
     SubTask,
+    SubTaskResult,
     TaskPlan,
     ResourceConfig,
     OrchestratorError,
@@ -112,23 +113,34 @@ class ResearchOrchestrator:
     def _make_complete_task_tool(self):
         """Tool for subagents to signal completion"""
 
-        def complete_task(findings: str, sources: List[str], confidence: float = 0.8):
+        def complete_task(
+            insights: str,
+            findings: List[str],
+            sources: List[str],
+            confidence: float = 0.8,
+        ):
             print(f"running complete_task")
-            return {
-                "task_complete": True,
-                "findings": findings,
-                "sources": sources,
-                "confidence": confidence,
-            }
+            return SubTaskResult(
+                task_complete=True,
+                insights=insights,
+                findings=findings,
+                sources=sources,
+                confidence=confidence,
+            )
 
         return {
             "name": "complete_task",
-            "description": "FINAL STEP: Provide comprehensive research report synthesizing all findings. Call this when research subtasks have been completed and you have sufficient information to synthesize into a final report.",
+            "description": "Provide comprehensive research results organizing and compiling all findings. Call this when research subtasks have been completed and you have sufficient information to hand off to the lead researcher.",
             "function": complete_task,
             "parameters": {
-                "findings": {
+                "insights": {
                     "type": "string",
-                    "description": "Summary of research findings",
+                    "description": "Breakdown of key observations, notable discoveries, and important considerations you'd like to mention or share based on what you've analyzed",
+                },
+                "findings": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Collection of quotes, page sections, snippets, facts, or details most relevant to the research task that the lead researcher should have access to",
                 },
                 "sources": {
                     "type": "array",
@@ -193,9 +205,9 @@ class ResearchOrchestrator:
 
         # adapt complexity to tool call budget
         complexity_to_budget = {
-            1: "under 3 tool calls",  # simple
-            2: "3-7 tool calls",  # medium
-            3: "8-11 tool calls",  # complex
+            1: "under 4 tool calls",  # simple
+            2: "4-7 tool calls",  # medium
+            3: "8-12 tool calls",  # complex
         }
         today = datetime.date.today().isoformat()
 
@@ -245,17 +257,25 @@ class ResearchOrchestrator:
                     subtask.max_search_calls // 5
                 ),  # Rough complexity
                 timeout=self.SUBAGENT_TIMEOUT,
-                conversation_timeout=self.CONVERSATION_TIMEOUT
+                conversation_timeout=self.CONVERSATION_TIMEOUT,
             )
-
-            return {
-                "subtask_id": subtask.id,
-                "status": "completed",
-                "findings": result.get("final_response", ""),
-                "tool_calls_used": result.get("tool_calls_count", 0),
-                "raw_conversation": result.get("conversation", []),
-            }
-
+            if result and type(result) == dict:
+                
+                return {
+                    "subtask_id": subtask.id,
+                    "status": "completed",
+                    "findings": result.get("final_response", ""),
+                    "tool_calls_used": result.get("tool_calls_count", 0),
+                    "raw_conversation": result.get("conversation", []),
+                }
+            else:
+                return {
+                    "subtask_id": subtask.id,
+                    "status": "completed",
+                    "findings": result["final_response"],
+                    "tool_calls_used": result["tool_calls_count"],
+                    "raw_conversation": result["conversation"],
+                }
         except asyncio.TimeoutError:
             return {
                 "subtask_id": subtask.id,
@@ -373,7 +393,7 @@ class ResearchOrchestrator:
             □ Get search results
             □ Use web_fetch on 3-5 most promising URLs from search results
             □ Use complete_task, returning findings, sources, and confidence_score
-        □ Use complete_task using all subagent complete_task results to generate comprehensive synthesis
+        □ Use complete_task using all subagent complete_task results to generate a cited comprehensive report. Reflect on your analysis of the data and write a report that uses quotes and tells an evidence-backed narrative
         
         <important_guidelines>
         In communicating with subagents, maintain extremely high information density while being concise - describe everything needed in the fewest words possible.
@@ -407,14 +427,33 @@ class ResearchOrchestrator:
         )
         # claude-sonnet-4-20250514
         # claude-opus-4-1-20250805
+        # print(result)
+        print(f"result keys? {result.keys()}")
+        print(f"final_response: {result['final_response']}")
+        if result:
+            self.record_memories(result["conversation"])
         return result
+
+    def record_memories(self, conversation):
+        for message in conversation:
+            self.memory.append(message)
+        for i, message in enumerate(self.memory):
+            with open("output.txt", "w") as f:
+                f.writelines(
+                    [
+                        f"conversation length: {len(self.memory)}\nlast message -> role: {self.memory[i]['role']}, content -> {self.memory[message]['content']} \n",
+                        f"{str(message) if not isinstance(message, str) else message}\n",
+                    ]
+                )
+        return "done"
 
 
 qs = [
     # "What are the best ways to treat PCOS symptoms besides birth control?",
-    "globally, what are some of the best cities and/or regions for lesbian US expats right now?",
-    # "what tech skills are most going to continue being extremely hireable as AI improves?",
-    # "What are some low-overhead side-business ideas for a busy grad student looking to generate passive income?",
+    # "globally, what are some of the best cities and/or regions for lesbian US expats right now?",
+    "what tech skills are most going to continue being extremely hireable as AI improves?",
+    "which companies look best positioned to grow over the next 5 years in technology and are worth seeking employment at for junior/mid-level software engineers?"
+    "What are some low-overhead side-business ideas for a busy grad student looking to generate passive income?",
 ]
 
 
@@ -449,3 +488,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+# Using all of the outputs from subagents ran, write a long, thorough, and comprehensive report packed with specific examples and real world evidence that fully addresses the user query. This report should read like a research essay, not just a bulletted summary of the findings.

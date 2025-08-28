@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Dict, Any
+from typing import List, Dict, Any, TypedDict
 
 # Data classes ******************************
 
@@ -12,7 +12,8 @@ class ToolCall:
     name: str
     input: str | Dict[str, Any] | object
 
-@dataclass 
+
+@dataclass
 class ToolResult:
     tool_use_id: str
     content: Any
@@ -46,14 +47,23 @@ class ResourceConfig:
     timeout_seconds: int = 120
 
 
+# @dataclass
+# class SubTaskResult:
+#     task_id: str
+#     status: str  # "completed"|"timeout"|"error"
+#     findings: dict
+#     tool_calls_used: int
+#     execution_time: float
+#     error_message: str | None = None
+
+
 @dataclass
-class SubTaskResult:
-    task_id: str
-    status: str  # "completed"|"timeout"|"error"
-    findings: dict
-    tool_calls_used: int
-    execution_time: float
-    error_message: str | None = None
+class SubTaskResult(TypedDict):
+    task_complete: bool
+    insights: str
+    findings: List[str]
+    sources: List[str]
+    confidence: float
 
 
 class Query(Enum):
@@ -63,6 +73,7 @@ class Query(Enum):
 
 
 # Error handling ****************************
+
 
 class OrchestratorError(Exception):
     """Base exception for orchestrator failures"""

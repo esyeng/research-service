@@ -171,10 +171,10 @@ def _add_tool_results_to_messages(
 
 async def llm_call_with_tools(
     prompt: str,
-    tools: List[Dict],  # Tool definitions
+    tools: List[Dict],  # Tool definitions,
     model: str = "claude-3-7-sonnet-20250219",
     max_tokens: int = 4000,
-    timeout: int = 60,  # per-call timeout
+    timeout: int = 120,  # per-call timeout
     conversation_timeout: int = 300,  # conversation timeout
 ) -> Dict:
     """
@@ -198,7 +198,7 @@ async def llm_call_with_tools(
                 {
                     "type": "text",
                     "text": (
-                        prompt
+                        prompt + "..."
                         if isinstance(prompt, str)
                         else (
                             json.dumps(prompt)
@@ -223,9 +223,9 @@ async def llm_call_with_tools(
     tool_calls = []
     text_blocks = []
     tool_calls_count = 0
-    max_tool_calls = globals().get("MAX_TOOL_CALLS", 7)
+    max_tool_calls = globals().get("MAX_TOOL_CALLS", 10)
     conversation_start = time.time()
-    max_iterations = 5
+    max_iterations = 7
 
     for i in range(max_iterations):
         if time.time() - conversation_start > conversation_timeout:
@@ -255,7 +255,8 @@ async def llm_call_with_tools(
                         for text in text_blocks:
                             messages.append({"role": "assistant", "content": text})
                         if any(
-                            result.content.get("task_complete")
+                            getattr(result.content, "status", None)
+                            in ["error", "task_complete", "completed"]
                             for result in tool_results
                         ):
                             return {
@@ -263,8 +264,11 @@ async def llm_call_with_tools(
                                 "tool_calls_count": tool_calls_count,
                                 "conversation": messages,
                             }
+                        print("continue to next step")
                         continue
                 else:
+                    print("return from llm_call loop")
+
                     return {
                         "final_response": response.content[0].text,
                         "tool_calls_count": tool_calls_count,
@@ -364,7 +368,7 @@ def stream_llm_sync(
         system=[
             {
                 "type": "text",
-                "text": system_prompt,
+                "text": system_prompt + "...",
                 "cache_control": {"type": "ephemeral"},
             }
         ],  # utilize prompt caching of system message for cost efficiency
