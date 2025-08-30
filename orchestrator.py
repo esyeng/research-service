@@ -3,12 +3,9 @@ import asyncio
 import random
 import json
 from typing import List
-from helpers.llmclient import (
-    stream_llm_sync,
-    extract_json_from_markdown,
-    llm_call_with_tools,
-)
+from helpers.llmclient import LLMClient, extract_json_from_markdown
 from helpers.tools import web_search, web_fetch
+from agent import SearchBot
 from prompts.make import plan, pretty
 from utils.types import (
     SubTask,
@@ -19,6 +16,71 @@ from utils.types import (
     TaskDecompositionError,
 )
 from prompts.research_subagent import txt as research_subagent_prompt
+from newspaper import Article
+
+dummy_plan = {
+    "query_type": "breadth_first",
+    "complexity": 2,
+    "strategy": "Break down into distinct research areas: tech giants expanding operations, emerging growth companies, industry sectors with digital transformation needs, and companies with recent funding/expansion announcements. Each subtask covers different company categories to ensure comprehensive coverage without overlap.",
+    "subtasks": [
+        {
+            "id": "task_001",
+            "objective": "Research major tech companies and established corporations announcing expansion plans or increased engineering hiring for 2026",
+            "scope": "Focus on Fortune 500 tech companies, major cloud providers, established software companies, and large corporations with significant tech divisions that have made public statements about 2026 hiring plans",
+            "search_queries": [
+                "tech companies hiring software engineers 2026",
+                "Fortune 500 engineering hiring plans 2026",
+                "major tech companies expansion 2026",
+                "cloud providers hiring software developers 2026",
+            ],
+            "expected_output": "List of 10-15 major established companies with specific hiring announcements, expansion plans, or growth initiatives requiring software engineers in 2026",
+            "max_searches": 5,
+            "priority": "high",
+        },
+        {
+            "id": "task_002",
+            "objective": "Identify high-growth startups and scale-ups that recently secured funding and are likely to increase software engineering hiring",
+            "scope": "Focus on startups that raised Series B+ funding in 2024-2025, unicorn companies preparing for IPO, and fast-growing private companies in hot sectors like AI, fintech, healthtech",
+            "search_queries": [
+                "startups hiring software engineers 2026",
+                "venture funding 2024 2025 engineering hiring",
+                "unicorn companies hiring plans 2026",
+                "Series B startups software developer jobs",
+            ],
+            "expected_output": "List of 10-12 high-growth startups and scale-ups with recent funding that indicates expansion and engineering team growth in 2026",
+            "max_searches": 5,
+            "priority": "high",
+        },
+        {
+            "id": "task_003",
+            "objective": "Research traditional industries undergoing digital transformation that will need more software engineering talent",
+            "scope": "Focus on non-tech industries like healthcare, finance, manufacturing, retail, automotive that are investing heavily in digital initiatives and need software engineering talent",
+            "search_queries": [
+                "digital transformation hiring software engineers 2026",
+                "healthcare companies software developer jobs",
+                "financial services engineering hiring 2026",
+                "manufacturing digital initiatives hiring",
+            ],
+            "expected_output": "List of 8-10 companies from traditional industries that are expanding their software engineering teams due to digital transformation initiatives",
+            "max_searches": 4,
+            "priority": "medium",
+        },
+        {
+            "id": "task_004",
+            "objective": "Identify companies in emerging technology sectors with high growth potential requiring software engineering talent",
+            "scope": "Focus on companies in AI/ML, quantum computing, autonomous vehicles, renewable energy tech, space tech, and other cutting-edge sectors that are scaling up",
+            "search_queries": [
+                "AI companies hiring software engineers 2026",
+                "quantum computing jobs software developers",
+                "autonomous vehicle companies hiring",
+                "cleantech software engineering jobs 2026",
+            ],
+            "expected_output": "List of 8-10 companies in emerging tech sectors that are likely to significantly increase software engineering hiring based on market trends and growth trajectories",
+            "max_searches": 4,
+            "priority": "medium",
+        },
+    ],
+}
 
 
 class ResearchOrchestrator:
@@ -52,6 +114,7 @@ class ResearchOrchestrator:
 
     def __init__(self):
         self.memory = []
+        self.client = LLMClient()
 
     def _make_web_fetch_tool(self):
         """Tool for subagents to fetch full webpage content"""
@@ -67,231 +130,20 @@ class ResearchOrchestrator:
             },
         }
 
-    def _make_web_search_tool(self):
-        return {
-            "name": "web_search",
-            "description": "Search the web for information",
-            "function": web_search,
-            "parameters": {
-                "query": {"type": "string", "description": "Search query"},
-                "max_results": {
-                    "type": "integer",
-                    "description": "Max results to return",
-                    "default": 10,
-                },
-            },
-        }
-
-    def _make_run_subagent_tool(self, task_plan: TaskPlan):
-        async def run_subagent(subtask_id: str, custom_instructions: str | None = None):
-            # subagent execution logic here
-            subtask = next(st for st in task_plan.subtasks if st.id == subtask_id)
-
-            # execute subagent
-            result = await self._execute_single_subagent(subtask, custom_instructions)
-            print(f"ran_subagent on task: {subtask_id}")
-            return result
-
-        return {
-            "name": "run_subagent",
-            "description": f"Execute a research subtask. Available subtasks: {[st.id + ': ' + st.objective for st in task_plan.subtasks]}",
-            "function": run_subagent,
-            "parameters": {
-                "subtask_id": {
-                    "type": "string",
-                    "description": "ID of the subtask to execute",
-                    "enum": [st.id for st in task_plan.subtasks],
-                },
-                "custom_instructions": {
-                    "type": "string",
-                    "description": "Additional specific instructions for this subagent",
-                    # "required": False,
-                },
-            },
-        }
-
-    def _make_complete_task_tool(self):
-        """Tool for subagents to signal completion"""
-
-        def complete_task(
-            insights: str,
-            findings: List[str],
-            sources: List[str],
-            confidence: float = 0.8,
-        ):
-            print(f"running complete_task")
-            return SubTaskResult(
-                task_complete=True,
-                insights=insights,
-                findings=findings,
-                sources=sources,
-                confidence=confidence,
-            )
-
-        return {
-            "name": "complete_task",
-            "description": "Provide comprehensive research results organizing and compiling all findings. Call this when research subtasks have been completed and you have sufficient information to hand off to the lead researcher.",
-            "function": complete_task,
-            "parameters": {
-                "insights": {
-                    "type": "string",
-                    "description": "Breakdown of key observations, notable discoveries, and important considerations you'd like to mention or share based on what you've analyzed",
-                },
-                "findings": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Collection of quotes, page sections, snippets, facts, or details most relevant to the research task that the lead researcher should have access to",
-                },
-                "sources": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "List of sources used",
-                },
-                "confidence": {
-                    "type": "number",
-                    "description": "Confidence in findings (0-1)",
-                },
-            },
-        }
-
-    def _estimate_subtask_complexity(self, subtask: SubTask) -> int:
-        """Quick heuristic to estimate subtask complexity for budget setting"""
-        if len(subtask.search_focus) <= 2 and len(subtask.objective.split()) <= 10:
-            return 1
-        elif len(subtask.search_focus) <= 4 and len(subtask.objective.split()) <= 20:
-            return 2
-        else:
-            return 3
-
-    def _select_model(self, complexity_score: int = 1):
-        model_choices = {
-            "straightforward": "claude-3-5-haiku-20241022",
-            "moderate": "claude-3-7-sonnet-20250219",
-            "complex": "claude-sonnet-4-20250514",
-        }
-        simp = complexity_score == 1
-        mid = complexity_score == 2
-        return (
-            model_choices["straightforward"]
-            if simp
-            else model_choices["moderate"] if mid else model_choices["complex"]
-        )
-
-    def _allocate_resources(self, task_plan: TaskPlan) -> ResourceConfig:
-        model_choices = {
-            "straightforward": "claude-3-5-haiku-20241022",
-            "moderate": "claude-3-7-sonnet-20250219",
-            "complex": "claude-sonnet-4-20250514",
-        }
-        simp = task_plan.complexity_score == 1
-        mid = task_plan.complexity_score == 2
-        if task_plan.complexity_score > 3:
-            raise OrchestratorError("Complexity score out of range")
-
-        return ResourceConfig(
-            max_subagents=1 if simp else 3 if mid else 4,
-            searches_per_agent=4 if simp else 7 if mid else 12,
-            model_per_task=(
-                model_choices["straightforward"] if simp else model_choices["moderate"]
-            ),
-            total_token_budget=12000 if simp else 16000,
-            timeout_seconds=60 if simp else 120,
-        )
-
-    def _build_subagent_prompt(
-        self, subtask: SubTask, tools_available: List[str]
-    ) -> str:
-        """Build focused subagent prompt using template"""
-
-        # adapt complexity to tool call budget
-        complexity_to_budget = {
-            1: "under 4 tool calls",  # simple
-            2: "4-7 tool calls",  # medium
-            3: "8-12 tool calls",  # complex
-        }
-        today = datetime.date.today().isoformat()
-
-        # prompt with task injected
-        return f"""
-        You are a research subagent working as part of a team. The current date is {today}. 
-
-        <task>
-        Objective: {subtask.objective}
-        Expected Output: {subtask.expected_output}
-        Suggested Starting Points: {subtask.search_focus}
-        Research Budget: {complexity_to_budget.get(self._estimate_subtask_complexity(subtask), "3-7 tool calls")}
-        </task>
-
-            {research_subagent_prompt} 
-
-        Available tools: {", ".join(tools_available)}
-        Exexute your task using the tools you have access to, 
-        """
-
-    async def _execute_single_subagent(
-        self, subtask: SubTask, custom_instructions: str | None = None
-    ) -> dict:
-        """Execute a single subagent using subagent prompt"""
-        print(f"executing single subagent on task: {subtask.id} -> {subtask.objective}")
-
-        subagent_prompt = self._build_subagent_prompt(
-            subtask, tools_available=["web_search", "web_fetch", "complete_task"]
-        )
-
-        # add custom instructions if provided by orchestrator
-        if custom_instructions:
-            subagent_prompt += f"\n\nAdditional instructions from lead researcher: {custom_instructions}"
-
-        # execute subagent with its own tool set
-        subagent_tools = [
-            self._make_web_search_tool(),
-            self._make_web_fetch_tool(),
-            self._make_complete_task_tool(),
-        ]
-
-        try:
-            result = await llm_call_with_tools(
-                prompt=subagent_prompt,
-                tools=subagent_tools,
-                model=self._select_model(
-                    subtask.max_search_calls // 5
-                ),  # Rough complexity
-                timeout=self.SUBAGENT_TIMEOUT,
-                conversation_timeout=self.CONVERSATION_TIMEOUT,
-            )
-            if result and type(result) == dict:
-                
-                return {
-                    "subtask_id": subtask.id,
-                    "status": "completed",
-                    "findings": result.get("final_response", ""),
-                    "tool_calls_used": result.get("tool_calls_count", 0),
-                    "raw_conversation": result.get("conversation", []),
-                }
-            else:
-                return {
-                    "subtask_id": subtask.id,
-                    "status": "completed",
-                    "findings": result["final_response"],
-                    "tool_calls_used": result["tool_calls_count"],
-                    "raw_conversation": result["conversation"],
-                }
-        except asyncio.TimeoutError:
-            return {
-                "subtask_id": subtask.id,
-                "status": "timeout",
-                "findings": "Subagent execution timed out",
-                "tool_calls_used": 0,
-                "error": f"Exceeded {self.SUBAGENT_TIMEOUT}s timeout",
-            }
-        except Exception as e:
-            return {
-                "subtask_id": subtask.id,
-                "status": "error",
-                "findings": "",
-                "tool_calls_used": 0,
-                "error": str(e),
-            }
+    # def _make_web_search_tool(self):
+    #     return {
+    #         "name": "web_search",
+    #         "description": "Search the web for information",
+    #         "function": web_search,
+    #         "parameters": {
+    #             "query": {"type": "string", "description": "Search query"},
+    #             "max_results": {
+    #                 "type": "integer",
+    #                 "description": "Max results to return",
+    #                 "default": 10,
+    #             },
+    #         },
+    #     }
 
     def _parse_and_validate(self, raw_response: str | dict) -> TaskPlan:
         """
@@ -353,107 +205,221 @@ class ResearchOrchestrator:
 
     def analyze_query(self, query: str):
         plan_json = plan(query=query, current_date=datetime.date.today())
-        raw = stream_llm_sync(query, plan_json)
+        raw = self.client.stream_synchronous(query, plan_json)
         return self._parse_and_validate(raw)
 
-    async def execute_research(self, query: str) -> dict:
-        """Main research flow with orchestrated tool-calling"""
-        task_plan = self.analyze_query(query)
-        resource_config = self._allocate_resources(task_plan)
-        spec = f"""
-        - Max Subagents: {resource_config.max_subagents}
-        - Searches Per Agent: {resource_config.searches_per_agent}
-        - Model Per Task: {resource_config.model_per_task}
-        """
-        print(f"spec: {spec}")
+    def get_article_text(self, url: str):
+        article = Article(url)
+        article.download()
+        article.parse()
+        return article.text
+
+    async def execute_research(
+        self,
+        query: str,
+    ) -> dict:
+        """Main research flow with programatic tool-calling"""
+        # task_plan = self.analyze_query(query)
+        task_plan = self._parse_and_validate(dummy_plan)
+
+        agent_results = []  # will store final_response blobs (strings or dicts)
+        articles = []
+        sources = []
+
+        for task in task_plan.subtasks:
+            agent = SearchBot(task)
+            try:
+                res = await agent._execute()
+            except Exception as e:
+                print(f"[ERROR] subagent {task.id} crashed: {e}", flush=True)
+                continue
+
+            print(f"ran SearchBot on task: {task.id}")
+            print(f"{'=' * 20}\nsubagent result: {res}\n")
+
+            # Expect res to be a dict with keys: status, final_response, raw_conversation, tool_calls_used, error
+            if not isinstance(res, dict):
+                print(f"[WARN] unexpected subagent result type: {type(res)}. Skipping.")
+                continue
+
+            status = res.get("status", "error")
+            if status != "completed":
+                print(
+                    f"[WARN] subagent {task.id} returned status={status}; error={res.get('error')!r}"
+                )
+                # if you want to add partial output even on error, you could:
+                maybe = res.get("final_response")
+                if maybe:
+                    agent_results.append(maybe)
+                continue
+
+            final = res.get("final_response")
+            if final is not None:
+                agent_results.append(final)
+
+            # collect sources if final is a dict containing them
+            if isinstance(final, dict) and final.get("sources"):
+                for url in final.get("sources", []):
+                    if url not in sources:
+                        sources.append(url)
+
+            # merge any raw conversation memory right away
+            convo = res.get("raw_conversation") or res.get("conversation")
+            if convo and isinstance(convo, list):
+                try:
+                    self.record_memories(convo)
+                except Exception as e:
+                    print(f"[WARN] record_memories failed: {e}")
+
+        # If we found sources, fetch article text (robust to failures)
+        for url in list(sources):  # iterate a copy
+            try:
+                text = self.get_article_text(url)
+            except Exception as e:
+                print(f"[WARN] failed to fetch article {url}: {e}")
+                text = ""
+            articles.append({"link": url, "text": text})
+        research_findings_serialized = json.dumps(
+            agent_results, ensure_ascii=False, indent=2
+        )
         orchestration_prompt = f"""
-        You are an AI research orchestrator armed with a team of subagent researchers. You are tasked with executing the following research plan for the provided query:
 
-        Original Query: {query}
-        Strategy: {task_plan.strategy}
-        Query Type: {task_plan.query_type}
-        Subtasks: {len(task_plan.subtasks)} parallel tasks
-        Subagent specifications: {spec}
+        You are tasked with writing a comprehensive essay based on a given query and research findings. Your goal is to provide a detailed, impartial, and informative response that addresses the query in depth. Follow these instructions carefully:
 
-        Your job:
-        1. Use run_subagent tool for each subtask in parallel
-        2. Monitor progress and wait for all subtasks to complete
-        3. Synthesize all subtask results into a comprehensive report
-        4. Use complete_task when done
+        First, review the following research findings:
 
-        Key constraints from planning:
-        - Maximum {len(task_plan.subtasks)} subagents
-        - Each subtask has specific boundaries to prevent overlap
+        <research_findings>{research_findings_serialized}
+        </research_findings>
 
-        Execute the plan now using parallel subagent calls. Keep going until you are ready to report your findings, at which point you will use complete_task, passing in all of your findings, sources, and confidence scores.
-        
-        CRITICAL CHECKLIST - Complete ALL items:
-        □ Run subagents for each subtask  
-        □ each subagent should:
-            □ Get search results
-            □ Use web_fetch on 3-5 most promising URLs from search results
-            □ Use complete_task, returning findings, sources, and confidence_score
-        □ Use complete_task using all subagent complete_task results to generate a cited comprehensive report. Reflect on your analysis of the data and write a report that uses quotes and tells an evidence-backed narrative
-        
-        <important_guidelines>
-        In communicating with subagents, maintain extremely high information density while being concise - describe everything needed in the fewest words possible.
-        As you progress through the search process:
-        1. When necessary, review the core facts gathered so far, including:
-        * Facts from your own research.
-        * Facts reported by subagents.
-        * Specific dates, numbers, and quantifiable data.
-        2. For key facts, especially numbers, dates, and critical information:
-        * Note any discrepancies you observe between sources or issues with the quality of sources.
-        * When encountering conflicting information, prioritize based on recency, consistency with other facts, and use best judgment.
-        3. Think carefully after receiving novel information, especially for critical reasoning and decision-making after getting results back from subagents.
-        4. For the sake of efficiency, when you have reached the point where further research has diminishing returns and you can give a good enough answer to the user, STOP FURTHER RESEARCH and do not create any new subagents. Just write your final report at this point. Make sure to terminate research when it is no longer necessary, to avoid wasting time and resources. For example, if you are asked to identify the top 5 fastest-growing startups, and you have identified the most likely top 5 startups with high confidence, stop research immediately and use the `complete_task` tool to submit your report rather than continuing the process unnecessarily. 
-        5. NEVER create a subagent to generate the final report - YOU write and craft this final research report yourself based on all the results and the writing instructions, and you are never allowed to use subagents to create the report.
-        </important_guidelines>
 
+        Now, carefully analyze the query:
+
+        <query>
+        {query}
+        </query>
+
+        Before writing your essay, consider the following:
+
+        1. Identify the main topics and subtopics related to the query.
+        2. Organize the research findings into relevant categories.
+        3. Look for connections, patterns, or contradictions in the data.
+        4. Determine the most important and relevant information to include.
+
+        Structure your essay as follows:
+
+        1. Introduction: Briefly introduce the topic and provide context for the query.
+        2. Main body: Divide this section into relevant subsections, each addressing a key aspect of the query.
+        3. Conclusion: Summarize the main points and provide a balanced overview of the findings.
+
+        When writing your essay:
+
+        1. Remain objective and impartial throughout.
+        2. Use clear, concise language appropriate for an academic or professional audience.
+        3. Provide specific examples, data, and quotes from the research findings to support your points.
+        4. Address any conflicting information or perspectives found in the research.
+        5. Ensure a logical flow of ideas between paragraphs and sections.
+        6. Use transitional phrases to connect ideas and improve readability.
+
+        if you would like to see any result's full article text, you can find the article's full text via __item__.text in <articles>{articles}</articles>
+
+        Citations and references:
+        from these sources: {sources}
+        1. Use in-text citations whenever you reference information from the research findings.
+        2. Format citations as [Source X], where X is the number of the source as listed in the research findings.
+        3. If quoting directly, use quotation marks and include the source number.
+
+        Output your essay within <essay> tags. After the essay, provide a list of all sources cited within <sources> tags.
+
+        Important: DO NOT include points as bullets or numbered lists within the essay, the correct format is as if writing an academic paper. If you find yourself tempted to take shortcuts or use shorthand, remember that you are writing for completion and thoroughness.
+
+        Remember to thoroughly address the query, providing a comprehensive and detailed response that synthesizes the information from the research findings.
         """
         # print(f"orc prompt? {orchestration_prompt}")
-        subagent_tools = [
-            self._make_complete_task_tool(),
-            self._make_run_subagent_tool(task_plan),
-        ]
 
         # This is where the magic happens - LLM manages the flow
-        result = await llm_call_with_tools(
+        result = await self.client.call_llm_with_tools(
             orchestration_prompt,
-            tools=subagent_tools,
-            model="claude-sonnet-4-20250514",
+            system="You are an expert academic writer",
+            tools=[],
+            model="claude-3-7-sonnet-20250219",
             max_tokens=16000,
             timeout=600,
         )
+        # claude-3-7-sonnet-20250219
         # claude-sonnet-4-20250514
         # claude-opus-4-1-20250805
-        # print(result)
-        print(f"result keys? {result.keys()}")
-        print(f"final_response: {result['final_response']}")
-        if result:
-            self.record_memories(result["conversation"])
-        return result
+        if not isinstance(result, dict):
+            print("[ERROR] orchestrator returned non-dict response:", result)
+            return {
+                "status": "error",
+                "final_response": None,
+                "raw_conversation": [],
+                "error": "orchestrator_returned_non_dict",
+            }
+        final_response = result.get("final_response") or result.get("response") or ""
+        raw_conv = result.get("raw_conversation") or result.get("conversation") or []
+        err = result.get("error")
+
+        print("FINAL RAW CONVERSATION:", raw_conv)
+        print("FINAL ERROR:", err)
+
+        if raw_conv:
+            try:
+                self.record_memories(raw_conv)
+            except Exception as e:
+                print(f"[WARN] record_memories failed after orchestrator: {e}")
+        return {
+            "status": result.get("status", "completed" if final_response else "error"),
+            "final_response": final_response,
+            "raw_conversation": raw_conv,
+            "error": err,
+            "tool_calls_used": result.get(
+                "tool_calls_count", result.get("tool_calls_used", 0)
+            ),
+        }
 
     def record_memories(self, conversation):
-        for message in conversation:
-            self.memory.append(message)
-        for i, message in enumerate(self.memory):
-            with open("output.txt", "w") as f:
-                f.writelines(
-                    [
-                        f"conversation length: {len(self.memory)}\nlast message -> role: {self.memory[i]['role']}, content -> {self.memory[message]['content']} \n",
-                        f"{str(message) if not isinstance(message, str) else message}\n",
-                    ]
+        """
+        Append conversation messages to self.memory and append a small human-readable log file.
+        conversation: list of message dicts, each message has 'role' and 'content' (content is usually a list of blocks).
+        """
+        if not conversation:
+            return "no conversation"
+
+        # Extend internal memory
+        self.memory.extend(conversation)
+
+        # Write a compact log (append mode). Avoid crashing on weird message shapes.
+        try:
+            with open("output.txt", "a", encoding="utf-8") as f:
+                f.write(
+                    f"\n--- memory dump at {datetime.datetime.utcnow().isoformat()} ---\n"
                 )
+                f.write(f"total memory length: {len(self.memory)}\n")
+                for i, message in enumerate(conversation, start=1):
+                    role = message.get("role", "unknown")
+                    content = message.get("content")
+                    # show a truncated JSON-safe preview of content
+                    try:
+                        content_preview = json.dumps(content, ensure_ascii=False)
+                    except Exception:
+                        content_preview = repr(content)
+                    if len(content_preview) > 1000:
+                        content_preview = content_preview[:1000] + " ...[truncated]"
+                    f.write(f"{i}. role={role} content={content_preview}\n")
+        except Exception as e:
+            print(f"[WARN] Failed to write memory file: {e}")
+
         return "done"
 
 
 qs = [
     # "What are the best ways to treat PCOS symptoms besides birth control?",
+    "which companies may be increasing hiring of software engineers going into 2026?",
     # "globally, what are some of the best cities and/or regions for lesbian US expats right now?",
-    "what tech skills are most going to continue being extremely hireable as AI improves?",
-    "which companies look best positioned to grow over the next 5 years in technology and are worth seeking employment at for junior/mid-level software engineers?"
-    "What are some low-overhead side-business ideas for a busy grad student looking to generate passive income?",
+    # "what tech skills are most going to continue being extremely hireable as AI improves?",
+    # "which companies look best positioned to grow over the next 5 years in technology and are worth seeking employment at for junior/mid-level software engineers?"
+    # "What are some low-overhead side-business ideas for a busy grad student looking to generate passive income?",
 ]
 
 
@@ -461,26 +427,7 @@ async def main():
     orchestrator = ResearchOrchestrator()
     result = await orchestrator.execute_research(qs[random.randint(0, len(qs) - 1)])
     if result:
-        with open("output.txt", "w") as f:
-            for entry in result:
-                # if entry == "final_response":
-                #     if isinstance(entry, (dict, object, json)):
-                #         d = json.loads(result[entry])
-                #         for k in d:
-                #             if k == "subtask_id" or k == "status":
-                #                 f.write(f"{k}:{d[k]}\n")
-                if entry == "tool_calls_count":
-                    f.write(f"Tool Calls Count: {result[entry]}\n")
-                if entry == "error":
-                    f.write(f"Error Message: {result[entry]}\n")
-                if entry == "conversation":
-                    for item in result[entry]:
-                        f.writelines(
-                            [
-                                f"conversation length: {len(result[entry])}\nlast message -> role: {result[entry][-1]['role']}, content -> {result[entry][-1]['content']} \n",
-                                f"{str(item) if not isinstance(item, str) else item}\n",
-                            ]
-                        )
+        print(f"final_response in result from main: {result['final_response']}")
 
         # pretty(result["final_response"])
         return result
@@ -488,6 +435,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-# Using all of the outputs from subagents ran, write a long, thorough, and comprehensive report packed with specific examples and real world evidence that fully addresses the user query. This report should read like a research essay, not just a bulletted summary of the findings.

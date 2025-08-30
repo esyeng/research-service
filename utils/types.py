@@ -1,6 +1,7 @@
+import json
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Dict, Any, TypedDict
+from typing import List, Dict, Any, TypedDict, Union
 
 # Data classes ******************************
 
@@ -10,14 +11,7 @@ class ToolCall:
     id: str
     type: str
     name: str
-    input: str | Dict[str, Any] | object
-
-
-@dataclass
-class ToolResult:
-    tool_use_id: str
-    content: Any
-    error: str | None = None
+    input: Union[str, Dict[str, Any], object]
 
 
 @dataclass
