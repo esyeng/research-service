@@ -1,21 +1,10 @@
 import datetime
 import asyncio
-import random
-import json
 import time
-from typing import List, Callable
-from helpers.llmclient import LLMClient, extract_json_from_markdown
+from typing import List
+from helpers.llmclient import LLMClient
 from helpers.tools import web_search, web_fetch, complete_task
-from prompts.make import plan, pretty
-from utils.types import (
-    SubTask,
-    SubTaskResult,
-    TaskPlan,
-    ResourceConfig,
-    OrchestratorError,
-    TaskDecompositionError,
-)
-from prompts.research_subagent import txt as research_subagent_prompt
+from utils.types import SubTask
 
 
 class SearchBot:
@@ -137,7 +126,6 @@ class SearchBot:
 
     def _make_complete_task_tool(self):
         """Tool for subagents to signal completion"""
-
         return {
             "name": "complete_task",
             "description": "Provide comprehensive research results organizing and compiling all findings. Call this when research subtasks have been completed and you have sufficient information to hand off to the lead researcher.",
@@ -177,11 +165,8 @@ class SearchBot:
                 "raw_conversation": [],
                 "error": None,
             }
-
         tool_calls_used = res.get("tool_calls_count") or res.get("tool_calls_") or 0
-
         status = "error" if res.get("error") else "completed"
-
         return {
             "status": status,
             "final_response": res.get("final_response", ""),
@@ -195,41 +180,28 @@ class SearchBot:
         print(
             f"executing single subagent on task: {self.task.id} -> {self.task.objective}"
         )
-
         subagent_prompt = self._build_prompt(
             tools_available=["web_search", "web_fetch", "complete_task"]
         )
-
-        # Prepare the tool definitions
         subagent_tools_list = [
             self._make_web_search_tool(),
             self._make_web_fetch_tool(),
             self._make_complete_task_tool(),
         ]
-
-        # Convert list of tool dicts into name -> function mapping for orchestrator
-        tool_functions: dict[str, Callable] = {
-            t["name"]: t["function"] for t in subagent_tools_list
-        }
-
         start = time.monotonic()
-
         try:
             result = await self.client.call_llm_with_tools(
                 prompt=subagent_prompt,
                 system=self.system,
-                tools=subagent_tools_list,  # pass list for call_llm_with_tools, works with new refactor
+                tools=subagent_tools_list,
                 model="claude-3-5-haiku-20241022",
                 timeout=self.TIMEOUT,
                 conversation_timeout=self.CONVERSATION_TIMEOUT,
             )
-
-            # Now normalize the output
             out = self._normalize_orchestrator_result(result)
             out["task_id"] = self.task.id
             out["latency_ms"] = int((time.monotonic() - start) * 1000)
             return out
-
         except asyncio.TimeoutError:
             return {
                 "task_id": self.task.id,
@@ -240,7 +212,6 @@ class SearchBot:
                 "error": f"Exceeded {self.TIMEOUT}s timeout",
                 "latency_ms": int((time.monotonic() - start) * 1000),
             }
-
         except Exception as e:
             return {
                 "task_id": self.task.id,
@@ -251,21 +222,3 @@ class SearchBot:
                 "error": str(e),
                 "latency_ms": int((time.monotonic() - start) * 1000),
             }
-
-
-"""
-Simplicity refactor ->
-
-Using one agent
-Hard code agent to write a specific report using search and fetch
-
-Immediate next steps:
-
-Write an example report (what I want to see emailed to me)
-
-Then write the prompt with the research question for the agent to gather research materials to satisfy the question -> uses search
-
-Then in a separate API call,
-Pass in the research materials and the example report
-   This should prompt the agent to use fetch to mine for examples, then output final report
-"""
