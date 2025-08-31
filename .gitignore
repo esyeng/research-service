@@ -46,6 +46,8 @@ venv.bak/
 pip-log.txt
 pip-delete-this-directory.txt
 
+internal/
+
 # Unit test / coverage reports
 htmlcov/
 .tox/
