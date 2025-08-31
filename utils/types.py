@@ -1,4 +1,3 @@
-import json
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Dict, Any, TypedDict, Union
@@ -29,7 +28,7 @@ class TaskPlan:
     strategy: str
     query_type: str
     subtasks: List[SubTask] = field(default_factory=list)
-    complexity_score: int = 1  # scale: 1=simple, 2=moderate, 3=complex
+    complexity_score: int = 1
 
 
 @dataclass
@@ -39,16 +38,6 @@ class ResourceConfig:
     model_per_task: str = "claude-sonnet-4-20250514"
     total_token_budget: int = 16000
     timeout_seconds: int = 120
-
-
-# @dataclass
-# class SubTaskResult:
-#     task_id: str
-#     status: str  # "completed"|"timeout"|"error"
-#     findings: dict
-#     tool_calls_used: int
-#     execution_time: float
-#     error_message: str | None = None
 
 
 @dataclass
