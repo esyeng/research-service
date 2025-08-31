@@ -1,11 +1,21 @@
 import os
 import aiohttp
-import asyncio
 import httpx
 import json
-# from newspaper import Article
 from typing import List
-from helpers.llmclient import require_env
+from helpers.data_methods import prune_brave_search_json
+from utils.types import SubTaskResult
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def require_env(name: str) -> str:
+    v = os.getenv(name)
+    if v is None or not v.strip():
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return v.strip()
+
 
 BRAVE_SEARCH_API_KEY = require_env("BRAVE_SEARCH_API_KEY")
 API_URL = "https://api.search.brave.com/res/v1/web/search"
@@ -13,14 +23,6 @@ API_HEADERS = {
     "X-Subscription-Token": BRAVE_SEARCH_API_KEY,
     "Accept": "application/json",
 }
-
-
-async def run_subagent_tool(
-    objective: str, search_focus: List[str], max_searches: int
-) -> dict:
-    """Tool for the orchestrator to spawn a research subagent"""
-    # First module to extract to subagent class
-    return {}
 
 
 async def web_fetch(url: str) -> str:
@@ -34,33 +36,45 @@ async def web_fetch(url: str) -> str:
 async def web_search(
     query: str,
     max_results: int = 10,
-) -> dict:
+) -> str:
     """Direct web search capability using Brave Search API for orchestrator"""
-
     params = {"q": query, "count": max_results, "country": "us", "search_lang": "en"}
-
+    print(f"\n\n!! WE FINNA SEARCH UP THIS SHIEE -~-~> {query}")
     async with aiohttp.ClientSession() as session:
         async with session.get(API_URL, headers=API_HEADERS, params=params) as resp:
-            data = await resp.json()
+            raw = await resp.json()
+            data = prune_brave_search_json(raw, 5)
             if resp.status != 200:
                 raise RuntimeError(f"Brave Search API error {resp.status}: {data}")
-            return data
+            return json.dumps(data)
+
+
+def complete_task(
+    insights: str,
+    findings: List[str],
+    sources: List[str],
+    confidence: float = 0.8,
+):
+    print(f"running complete_task")
+    return SubTaskResult(
+        task_complete=True,
+        insights=insights,
+        findings=findings,
+        sources=sources,
+        confidence=confidence,
+    )
 
 
 async def wikipedia(q):
     print(f"about to search wikipedia w/query: {q}")
     async with httpx.AsyncClient() as client:
-        result = await client.get("https://en.wikipedia.org/w/api.php", params={
-        "action": "query",
-        "list": "search",
-        "srsearch": q,
-        "format": "json"
-    })
+        result = await client.get(
+            "https://en.wikipedia.org/w/api.php",
+            params={
+                "action": "query",
+                "list": "search",
+                "srsearch": q,
+                "format": "json",
+            },
+        )
     return result.json()["query"]["search"][0]["snippet"]
-
-
-# def extract_text(url: str):
-#     article = Article(url)
-#     article.download()
-#     article.parse()
-#     return article.text
