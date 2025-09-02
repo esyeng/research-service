@@ -7,7 +7,7 @@ from helpers.tools import web_fetch
 from helpers.data_methods import plan, extract_json_from_markdown
 from utils.types import SubTask, TaskPlan, TaskDecompositionError
 from newspaper import Article
-from agent import SearchBot
+from helpers.agent import SearchBot
 
 
 class ResearchOrchestrator:
