@@ -277,12 +277,15 @@ class ResearchOrchestrator:
 
 
 qs = [
-    "What are the best ways to treat PCOS symptoms besides birth control?",
-    "which companies may be increasing hiring of software engineers going into 2026?",
-    "globally, what are some of the best cities and/or regions for lesbian US expats right now?",
-    "what tech skills are most going to continue being extremely hireable as AI improves?",
-    "which companies look best positioned to grow over the next 5 years in technology and are worth seeking employment at for junior/mid-level software engineers?"
-    "What are some low-overhead side-business ideas for a busy grad student looking to generate passive income?",
+    # "What are the best ways to treat PCOS symptoms besides birth control?",
+    # "which companies may be increasing hiring of software engineers going into 2026?",
+    # "globally, what are some of the best cities and/or regions for lesbian US expats right now?",
+    # "what tech skills are most going to continue being extremely hireable as AI improves?",
+    # "which companies look best positioned to grow over the next 5 years in technology and are worth seeking employment at for junior/mid-level software engineers?"
+    # "What are some low-overhead side-business ideas for a busy grad student looking to generate passive income?",
+    # "How fast will AI replace econometric modelers?",
+    "delicious new york style pizza sauce recipe historical approaches",
+    # "do caterpillars notice humans and interact with them with curiosity?"
 ]
 
 

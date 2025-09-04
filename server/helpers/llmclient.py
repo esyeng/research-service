@@ -186,7 +186,7 @@ class LLMClient:
                 if tool_calls:
                     try:
                         tool_results = await self._execute_tool_calls(
-                            tool_calls, formatted_tools
+                            tool_calls
                         )
                         tool_calls_count += len(tool_calls)
                         messages = self._add_tool_results_to_messages(
