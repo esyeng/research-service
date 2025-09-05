@@ -1,13 +1,16 @@
-from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import os
-import asyncio
+from .routes.api import api
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
-app.mount("/static", StaticFiles(directory="client"), name="static")
+client_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "client"))
+app.mount("/client", StaticFiles(directory=client_path), name="client")
+app.include_router(router=api)
+# app.mount("/api", api)
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,39 +21,9 @@ app.add_middleware(
 )
 
 
-# fake generator for demo for testing frontend streaming
-async def fake_token_generator(user_msg: str):
-    words = [
-        "Pretend",
-        "this",
-        "is",
-        "an",
-        "AI",
-        "streaming",
-        "tokens...",
-        "✨",
-        "all",
-        "very",
-        "impressive.",
-    ]
-    for w in words:
-        yield w + " "
-        await asyncio.sleep(0.1)  # simulate delay
-
-
 @app.get("/")
 def home():
     return FileResponse(os.path.join("client", "index.html"))
-
-
-# demo for testing frontend streaming
-@app.get("/demo")
-async def stream(msg: str):
-    async def event_generator():
-        async for token in fake_token_generator(msg):
-            yield token
-
-    return StreamingResponse(event_generator(), media_type="text/plain")
 
 
 if __name__ == "__main__":

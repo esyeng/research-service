@@ -1,10 +1,10 @@
 import datetime
 import asyncio
 import time
-from typing import List
-from helpers.llmclient import LLMClient
-from helpers.tools import web_search, web_fetch, complete_task
-from utils.types import SubTask
+from typing import List, AsyncGenerator, Any
+from .llmclient import LLMClient
+from .tools import web_search, web_fetch, complete_task
+from ..utils.types import SubTask
 
 
 class SearchBot:
@@ -175,7 +175,7 @@ class SearchBot:
             "error": res.get("error"),
         }
 
-    async def _execute(self) -> dict:
+    async def _execute(self) -> AsyncGenerator[Any, Any]:
         """Execute a single subagent using subagent prompt"""
         print(
             f"executing single subagent on task: {self.task.id} -> {self.task.objective}"
@@ -190,20 +190,20 @@ class SearchBot:
         ]
         start = time.monotonic()
         try:
-            result = await self.client.call_llm_with_tools(
+            async for result in self.client.call_llm_with_tools(
                 prompt=subagent_prompt,
                 system=self.system,
                 tools=subagent_tools_list,
                 model="claude-3-5-haiku-20241022",
                 timeout=self.TIMEOUT,
                 conversation_timeout=self.CONVERSATION_TIMEOUT,
-            )
-            out = self._normalize_orchestrator_result(result)
-            out["task_id"] = self.task.id
-            out["latency_ms"] = int((time.monotonic() - start) * 1000)
-            return out
+            ):
+                out = self._normalize_orchestrator_result(result)
+                out["task_id"] = self.task.id
+                out["latency_ms"] = int((time.monotonic() - start) * 1000)
+                yield out
         except asyncio.TimeoutError:
-            return {
+            result = {
                 "task_id": self.task.id,
                 "status": "timeout",
                 "final_response": "Subagent execution timed out",
@@ -212,8 +212,10 @@ class SearchBot:
                 "error": f"Exceeded {self.TIMEOUT}s timeout",
                 "latency_ms": int((time.monotonic() - start) * 1000),
             }
+            yield result
+            return
         except Exception as e:
-            return {
+            result = {
                 "task_id": self.task.id,
                 "status": "error",
                 "final_response": "...",
@@ -222,3 +224,5 @@ class SearchBot:
                 "error": str(e),
                 "latency_ms": int((time.monotonic() - start) * 1000),
             }
+            yield result
+            return

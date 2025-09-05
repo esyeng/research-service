@@ -3,10 +3,10 @@ import json
 import asyncio
 import httpx
 import time
-from utils.types import OrchestratorError
-from utils.types import ToolCall
-from helpers.tools import web_search, web_fetch, complete_task
-from typing import List, Dict, Callable, Any, Tuple
+from ..utils.types import OrchestratorError
+from ..utils.types import ToolCall
+from .tools import web_search, web_fetch, complete_task
+from typing import List, Dict, Callable, Any, Tuple, AsyncGenerator
 from anthropic import Anthropic, AsyncAnthropic
 from anthropic.types import Message
 from dotenv import load_dotenv
@@ -128,7 +128,7 @@ class LLMClient:
         max_tokens: int = 4000,
         timeout: int = 240,
         conversation_timeout: int = 700,
-    ) -> Dict:
+    ) -> AsyncGenerator[Dict, None]:
         """Execute LLM with tool calling capability in a conversation loop."""
         messages = [
             {
@@ -151,15 +151,12 @@ class LLMClient:
         conversation_start = time.time()
         max_iterations = 4
         runs = 0
+        yield {"msg": "querying llm..."}
         while runs < max_iterations:
             runs += 1
             if time.time() - conversation_start > conversation_timeout:
-                return {
-                    "final_response": "Conversation timed out",
-                    "tool_calls_count": tool_calls_count,
-                    "error": "conversation_timeout",
-                    "conversation": messages,
-                }
+                yield {"error": "conversation timed out"}
+                return
             try:
                 response = await asyncio.wait_for(
                     self.stream_asynchronous(
@@ -172,26 +169,28 @@ class LLMClient:
                     timeout=timeout,
                 )
             except asyncio.TimeoutError:
-                return {
-                    "final_response": "LLM call timed out",
+                yield {
+                    "error": "Single LLM call timed out",
                     "tool_calls_count": tool_calls_count,
-                    "error": "single_call_timeout",
-                    "conversation": messages,
+                    # "conversation": messages,
                 }
+                return
             if not response or not hasattr(response, "stop_reason"):
                 continue
             stop_reason = getattr(response, "stop_reason", None)
             if stop_reason == "tool_use":
+                print('want to see where is')
                 tool_calls, text_blocks = self._extract_tool_calls_and_text(response)
                 if tool_calls:
                     try:
-                        tool_results = await self._execute_tool_calls(
-                            tool_calls
-                        )
+                        print('next line is execute tool calls')
+                        tool_results = await self._execute_tool_calls(tool_calls)
+                        print(f"lets see if that worked: {len(tool_results)}")
                         tool_calls_count += len(tool_calls)
                         messages = self._add_tool_results_to_messages(
                             messages, tool_calls, tool_results
                         )
+                        print(f"and now messages: {messages}")
                         for text in text_blocks:
                             block = (
                                 {"type": "text", "text": text + "."}
@@ -201,18 +200,12 @@ class LLMClient:
                                     "text": json.dumps(text, default=str) + ".",
                                 }
                             )
+                            yield block
                             messages.append({"role": "assistant", "content": [block]})
-                        if any(
-                            isinstance(res, dict)
-                            and res.get("status")
-                            in ["completed", "task_complete", "error"]
-                            for res in tool_results
-                        ):
-                            return {
-                                "final_response": messages,
-                                "tool_calls_count": tool_calls_count,
-                                "conversation": messages,
-                            }
+                            return
+                        for result in tool_results:
+                            yield result
+                            return
                     except Exception as e:
                         raise OrchestratorError(
                             message=f"Error during tool execution: {e}",
@@ -222,17 +215,12 @@ class LLMClient:
                 final_text = (
                     response.content[0].text if response.content else "No response"
                 )
-                return {
+                yield {
                     "final_response": final_text,
-                    "tool_calls_count": tool_calls_count,
-                    "conversation": messages,
+                    "conversation": messages
                 }
-        return {
-            "final_response": messages[-1]["content"] if messages else "No Response",
-            "tool_calls_count": tool_calls_count,
-            "error": "max_iterations_exceeded",
-            "conversation": messages,
-        }
+                return
+        return
 
     # format tool def for llm
     def _convert_tool_definition(self, tool_def: Dict) -> Dict:
@@ -255,6 +243,7 @@ class LLMClient:
     async def _execute_tool_calls(self, tool_calls: List[ToolCall]) -> List[dict]:
         """Execute multiple tool calls in parallel and return normalized dict results."""
         tool_functions: Dict[str, Callable] = self.functions
+
         async def run_single(tc: ToolCall) -> dict:
             func = tool_functions.get(tc.name)
             if not callable(func):
@@ -278,6 +267,7 @@ class LLMClient:
                     "tool_use_id": tc.id,
                     "content": f"ERROR: Exception in tool {tc.name}: {e}",
                 }
+
         results = await asyncio.gather(*[run_single(tc) for tc in tool_calls])
         return [{"role": "user", "content": results}]
 

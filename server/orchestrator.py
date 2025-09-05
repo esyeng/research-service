@@ -2,12 +2,13 @@ import datetime
 import asyncio
 import random
 import json
-from helpers.llmclient import LLMClient
-from helpers.tools import web_fetch
-from helpers.data_methods import plan, extract_json_from_markdown
-from utils.types import SubTask, TaskPlan, TaskDecompositionError
+from .helpers.llmclient import LLMClient
+from .helpers.tools import web_fetch
+from .helpers.data_methods import plan, extract_json_from_markdown
+from .utils.types import SubTask, TaskPlan, TaskDecompositionError
 from newspaper import Article
-from helpers.agent import SearchBot
+from .helpers.agent import SearchBot
+from typing import AsyncGenerator, Any
 
 
 class ResearchOrchestrator:
@@ -105,7 +106,7 @@ class ResearchOrchestrator:
     async def execute_research(
         self,
         query: str,
-    ) -> dict:
+    ) -> AsyncGenerator[Any, Any]:
         """Main research flow with programatic tool-calling"""
         task_plan = self.analyze_query(query)
         agent_results = []
@@ -114,138 +115,147 @@ class ResearchOrchestrator:
         for task in task_plan.subtasks:
             agent = SearchBot(task)
             try:
-                res = await agent._execute()
+                async for result in agent._execute():
+                    if not isinstance(result, dict):
+                        print(f"[WARN] unexpected subagent result type: {type(result)}. Skipping.")
+                    status = result.get("status", "error")
+                    if status != "completed":
+                        print(
+                            f"[WARN] subagent {task.id} returned status={status}; error={res.get('error')!r}"
+                        )
+                    maybe = result.get("final_response")
+                    if maybe:
+                        agent_results.append(maybe)
+                        continue
+                    final = result.get("final_response")
+                    if final is not None:
+                        agent_results.append(final)
+                        if isinstance(final, dict) and final.get("sources"):
+                            for url in final.get("sources", []):
+                                if url not in sources:
+                                    sources.append(url)
+                        convo = result.get("raw_conversation") or result.get("conversation")
+                        if convo and isinstance(convo, list):
+                            try:
+                                self.record_memories(convo)
+                            except Exception as e:
+                                print(f"[WARN] record_memories failed: {e}")
+                                continue
             except Exception as e:
                 print(f"[ERROR] subagent {task.id} crashed: {e}", flush=True)
                 continue
             # print(f"ran SearchBot on task: {task.id}")
             # print(f"{'=' * 20}\nsubagent result: {res}\n")
-            if not isinstance(res, dict):
-                print(f"[WARN] unexpected subagent result type: {type(res)}. Skipping.")
-                continue
-            status = res.get("status", "error")
-            if status != "completed":
-                print(
-                    f"[WARN] subagent {task.id} returned status={status}; error={res.get('error')!r}"
-                )
-                maybe = res.get("final_response")
-                if maybe:
-                    agent_results.append(maybe)
-                continue
-            final = res.get("final_response")
-            if final is not None:
-                agent_results.append(final)
-            if isinstance(final, dict) and final.get("sources"):
-                for url in final.get("sources", []):
-                    if url not in sources:
-                        sources.append(url)
-            convo = res.get("raw_conversation") or res.get("conversation")
-            if convo and isinstance(convo, list):
+            
+ 
+        if len(sources) and len(sources) > 0:
+            for url in list(sources):
                 try:
-                    self.record_memories(convo)
+                    text = self.get_article_text(url)
                 except Exception as e:
-                    print(f"[WARN] record_memories failed: {e}")
-        for url in list(sources):
-            try:
-                text = self.get_article_text(url)
-            except Exception as e:
-                print(f"[WARN] failed to fetch article {url}: {e}")
-                text = ""
-            articles.append({"link": url, "text": text})
-        research_findings_serialized = json.dumps(
-            agent_results, ensure_ascii=False, indent=2
-        )
-        orchestration_prompt = f"""
-        You are tasked with writing a comprehensive essay based on a given query and research findings. Your goal is to provide a detailed, impartial, and informative response that addresses the query in depth. Follow these instructions carefully:
+                    print(f"[WARN] failed to fetch article {url}: {e}")
+                    text = ""
+                articles.append({"link": url, "text": text})
+            research_findings_serialized = json.dumps(
+                agent_results, ensure_ascii=False, indent=2
+            )
+            orchestration_prompt = f"""
+            You are tasked with writing a comprehensive essay based on a given query and research findings. Your goal is to provide a detailed, impartial, and informative response that addresses the query in depth. Follow these instructions carefully:
 
-        First, review the following research findings:
+            First, review the following research findings:
 
-        <research_findings>{research_findings_serialized}
-        </research_findings>
+            <research_findings>{research_findings_serialized}
+            </research_findings>
 
 
-        Now, carefully analyze the query:
+            Now, carefully analyze the query:
 
-        <query>
-        {query}
-        </query>
+            <query>
+            {query}
+            </query>
 
-        Before writing your essay, consider the following:
+            Before writing your essay, consider the following:
 
-        1. Identify the main topics and subtopics related to the query.
-        2. Organize the research findings into relevant categories.
-        3. Look for connections, patterns, or contradictions in the data.
-        4. Determine the most important and relevant information to include.
+            1. Identify the main topics and subtopics related to the query.
+            2. Organize the research findings into relevant categories.
+            3. Look for connections, patterns, or contradictions in the data.
+            4. Determine the most important and relevant information to include.
 
-        Structure your essay as follows:
+            Structure your essay as follows:
 
-        1. Introduction: Briefly introduce the topic and provide context for the query.
-        2. Main body: Divide this section into relevant subsections, each addressing a key aspect of the query.
-        3. Conclusion: Summarize the main points and provide a balanced overview of the findings.
+            1. Introduction: Briefly introduce the topic and provide context for the query.
+            2. Main body: Divide this section into relevant subsections, each addressing a key aspect of the query.
+            3. Conclusion: Summarize the main points and provide a balanced overview of the findings.
 
-        When writing your essay:
+            When writing your essay:
 
-        1. Remain objective and impartial throughout.
-        2. Use clear, concise language appropriate for an academic or professional audience.
-        3. Provide specific examples, data, and quotes from the research findings to support your points.
-        4. Address any conflicting information or perspectives found in the research.
-        5. Ensure a logical flow of ideas between paragraphs and sections.
-        6. Use transitional phrases to connect ideas and improve readability.
+            1. Remain objective and impartial throughout.
+            2. Use clear, concise language appropriate for an academic or professional audience.
+            3. Provide specific examples, data, and quotes from the research findings to support your points.
+            4. Address any conflicting information or perspectives found in the research.
+            5. Ensure a logical flow of ideas between paragraphs and sections.
+            6. Use transitional phrases to connect ideas and improve readability.
 
-        if you would like to see any result's full article text, you can find the article's full text via __item__.text in <articles>{articles}</articles>
+            if you would like to see any result's full article text, you can find the article's full text via __item__.text in <articles>{articles}</articles>
 
-        Citations and references:
-        from these sources: {sources}
-        1. Use in-text citations whenever you reference information from the research findings.
-        2. Format citations as [Source X], where X is the number of the source as listed in the research findings.
-        3. If quoting directly, use quotation marks and include the source number.
+            Citations and references:
+            from these sources: {sources}
+            1. Use in-text citations whenever you reference information from the research findings.
+            2. Format citations as [Source X], where X is the number of the source as listed in the research findings.
+            3. If quoting directly, use quotation marks and include the source number.
 
-        Output your essay within <essay> tags. After the essay, provide a list of all sources cited within <sources> tags.
+            Output your essay within <essay> tags. After the essay, provide a list of all sources cited within <sources> tags.
 
-        Important: DO NOT include points as bullets or numbered lists within the essay, the correct format is as if writing an academic paper. If you find yourself tempted to take shortcuts or use shorthand, remember that you are writing for completion and thoroughness.
+            Important: DO NOT include points as bullets or numbered lists within the essay, the correct format is as if writing an academic paper. If you find yourself tempted to take shortcuts or use shorthand, remember that you are writing for completion and thoroughness.
 
-        Remember to thoroughly address the query, providing a comprehensive and detailed response that synthesizes the information from the research findings.
-        """
-        result = await self.client.call_llm_with_tools(
-            orchestration_prompt,
-            system="You are an expert academic writer",
-            tools=[],
-            model="claude-3-7-sonnet-20250219",
-            max_tokens=16000,
-            timeout=600,
-        )
+            Remember to thoroughly address the query, providing a comprehensive and detailed response that synthesizes the information from the research findings.
+            """
+            async for res in self.client.call_llm_with_tools(
+                orchestration_prompt,
+                system="You are an expert academic writer",
+                tools=[],
+                model="claude-3-7-sonnet-20250219",
+                max_tokens=16000,
+                timeout=600,
+            ):
+                yield res
+                return
         # claude-3-7-sonnet-20250219 | claude-sonnet-4-20250514 | claude-opus-4-1-20250805
         #
         #
-        if not isinstance(result, dict):
-            print("[ERROR] orchestrator returned non-dict response:", result)
-            return {
-                "status": "error",
-                "final_response": None,
-                "raw_conversation": [],
-                "error": "orchestrator_returned_non_dict",
-            }
-        final_response = result.get("final_response") or result.get("response") or ""
-        raw_conv = result.get("raw_conversation") or result.get("conversation") or []
-        err = result.get("error")
+                # if not isinstance(res, dict):
+                #     print("[ERROR] orchestrator returned non-dict response:", res)
+                #     fin = {
+                #         "status": "error",
+                #         "final_response": None,
+                #         "raw_conversation": [],
+                #         "error": "orchestrator_returned_non_dict",
+                #     }
+                #     yield fin
+                #     return
+                # final_response = res.get("final_response") or res.get("response") or ""
+                # raw_conv = res.get("raw_conversation") or res.get("conversation") or []
+                # err = res.get("error")
 
-        print("FINAL RAW CONVERSATION:", raw_conv)
-        print("FINAL ERROR:", err)
+                # print("FINAL RAW CONVERSATION:", raw_conv)
+                # print("FINAL ERROR:", err)
 
-        if raw_conv:
-            try:
-                self.record_memories(raw_conv)
-            except Exception as e:
-                print(f"[WARN] record_memories failed after orchestrator: {e}")
-        return {
-            "status": result.get("status", "completed" if final_response else "error"),
-            "final_response": final_response,
-            "raw_conversation": raw_conv,
-            "error": err,
-            "tool_calls_used": result.get(
-                "tool_calls_count", result.get("tool_calls_used", 0)
-            ),
-        }
+                # if raw_conv:
+                #     try:
+                #         self.record_memories(raw_conv)
+                #     except Exception as e:
+                #         print(f"[WARN] record_memories failed after orchestrator: {e}")
+                # final_final = {
+                #     "status": res.get("status", "completed" if final_response else "error"),
+                #     "final_response": final_response,
+                #     "raw_conversation": raw_conv,
+                #     "error": err,
+                #     "tool_calls_used": res.get(
+                #         "tool_calls_count", res.get("tool_calls_used", 0)
+                #     ),
+                # }
+                # yield final_final
+                # return
 
     def record_memories(self, conversation):
         """

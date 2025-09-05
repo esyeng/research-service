@@ -17,12 +17,52 @@ btn.addEventListener("click", async () => {
     appendMessage(text, "user");
     input.value = "";
 
-    await streamDemo(text);
+    // await streamDemo(text);
+    await streamReply(text);
 });
 
 input.addEventListener('keypress', (e) => {
     if (e.key === 'Enter') btn.click();
 });
+
+
+async function streamReply(userText) {
+    const response = await fetch(`/api/research?question=${encodeURIComponent(userText)}`);
+    console.log(response.status + ' ' + response.statusText);
+    console.log(`response body: ${response.body}`)
+    const reader = response.body.getReader();
+    console.log(`response body reader: ${reader}`)
+
+    const decoder = new TextDecoder("utf-8");
+
+    let botMsg = document.createElement("div");
+    botMsg.classList.add("message", "bot");
+    chatWindow.appendChild(botMsg);
+
+    let buffer = "";
+    while (true) {
+        const { done, value } = await reader.read();
+        console.log(`raw value: ${value}`);
+
+        // Decode the current chunk
+        buffer += decoder.decode(value, { stream: true });
+        console.log(`BUFFER!: ${buffer}`);
+
+        // Optional: split on newline if server sends chunked lines
+        // e.g. for SSE or JSON streaming, parse buffer here
+        botMsg.textContent += buffer;
+        buffer = ""; // reset since we’re directly appending
+        chatWindow.scrollTop = chatWindow.scrollHeight;
+        if (done) break;
+
+    }
+
+    // flush any remaining buffered text
+    buffer += decoder.decode();
+    if (buffer) botMsg.textContent += buffer;
+    chatWindow.appendChild(botMsg);
+}
+
 
 
 async function streamDemo(inputText) {

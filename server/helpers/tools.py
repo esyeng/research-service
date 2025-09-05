@@ -3,8 +3,8 @@ import aiohttp
 import httpx
 import json
 from typing import List
-from helpers.data_methods import prune_brave_search_json
-from utils.types import SubTaskResult
+from .data_methods import prune_brave_search_json
+from ..utils.types import SubTaskResult
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -42,7 +42,9 @@ async def web_search(
     print(f"\n\n!! WE FINNA SEARCH UP THIS SHIEE -~-~> {query}")
     async with aiohttp.ClientSession() as session:
         async with session.get(API_URL, headers=API_HEADERS, params=params) as resp:
+            print('raw')
             raw = await resp.json()
+            print(raw)
             data = prune_brave_search_json(raw, 5)
             if resp.status != 200:
                 raise RuntimeError(f"Brave Search API error {resp.status}: {data}")
