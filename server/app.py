@@ -1,6 +1,6 @@
 import uvicorn
 import os
-from .routes.api import api
+from routes.api import api
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse

@@ -1,49 +1,160 @@
 import datetime
 import asyncio
-import random
 import json
-from .helpers.llmclient import LLMClient
-from .helpers.tools import web_fetch
-from .helpers.data_methods import plan, extract_json_from_markdown
-from .utils.types import SubTask, TaskPlan, TaskDecompositionError
+import random
+from helpers.llmclient import LLMClient
+from helpers.tools import web_search, web_fetch
+from helpers.data_methods import plan, essay_prompt, extract_json_from_markdown
+from utils.types import SubTask, TaskPlan, TaskDecompositionError
 from newspaper import Article
-from .helpers.agent import SearchBot
-from typing import AsyncGenerator, Any
+from typing import AsyncGenerator, Any, List, Dict
 
 
 class ResearchOrchestrator:
-    """Orchestrates the decomposition and allocation of research queries into actionable sub-tasks for AI research agents.
-    Attributes:
-        MAX_SUBAGENTS (int): Maximum number of sub-agents allowed per query.
-        MAX_SEARCHES_PER_AGENT (int): Maximum number of searches each sub-agent can perform.
-        SUBAGENT_TIMEOUT (int): Timeout in seconds for each sub-agent's task.
-        memory (list): Internal memory for storing orchestrator state or history.
-    """
-
     MAX_SUBAGENTS = 5
-    MAX_SEARCHES_PER_AGENT = 10
-    SUBAGENT_TIMEOUT = 120
-    CONVERSATION_TIMEOUT = 600
 
     def __init__(self):
-        self.memory = []
         self.client = LLMClient()
 
-    def _make_web_fetch_tool(self):
-        """Tool for subagents to fetch full webpage content"""
-        return {
-            "name": "web_fetch",
-            "description": "Get complete webpage content from URLs found in search results. Use this after web searches to get detailed information.",
-            "function": web_fetch,
-            "parameters": {
-                "url": {
-                    "type": "string",
-                    "description": "URL from search results to fetch full content",
-                }
-            },
-        }
+    def analyze_query(self, query: str) -> TaskPlan:
+        """Analyze query and create research plan"""
+        plan_json = plan(query=query, current_date=datetime.date.today())
+        raw = self.client.generate_text(plan_json, "You are an expert research planner")
+        return self._parse_and_validate(raw)
+
+    async def analyze_query_stream(self, query: str):
+        plan_json = plan(query=query, current_date=datetime.date.today())
+        full_response = ""
+        async for chunk in self.client.stream_text(
+            plan_json, "You are an expert research planner"
+        ):
+            full_response += chunk
+            yield chunk
+        # Just yield completion message, don't parse here
+        # yield f"\n✅ Plan analysis complete\n"
+
+    async def execute_research(self, query: str) -> AsyncGenerator[str, None]:
+        """Simplified sequential research execution"""
+        final_essay = ""
+        try:
+            # 1. Announce start
+            yield f"\n\n🔍 Starting research on: {query}\n\n"
+
+            # 2. Create research plan
+            yield "\n\n📋 Creating research plan...\n"
+            task_plan = self.analyze_query(query)
+            if task_plan.strategy:
+                yield f"\n\n💭 Strategy:\n --> {task_plan.strategy}\n\n"
+            research_data = []
+
+            # 3. Execute tasks sequentially
+            for i, task in enumerate(task_plan.subtasks, 1):
+                yield f"\n\n🚀 Task {i}/{len(task_plan.subtasks)}: {task.objective}\n"
+
+                task_result = await self._execute_research_task(task)
+                research_data.append(task_result)
+                srcs = task_result.get('sources', [])
+
+                yield f"\n\n✅ Task {i} complete: {len(srcs)} sources found.\n\nSources:\n\n[\n\n"
+                for src in srcs:
+                    yield f"\n{src},\n"
+                yield "\n\n]\n\n"
+            # 4. Generate final essay
+            if any(result.get("sources") for result in research_data):
+                sources = []
+                for result in research_data:
+                    sources.append(result.get("sources"))
+                yield "\n\n📝 Generating comprehensive essay...\n\n"
+                # async for chunk in self._generate_final_essay_stream(
+                #     research_data, query, sources
+                # ):
+                #     final_essay += chunk
+                #     # yield chunk
+                essay = await self._generate_final_essay(research_data, query, sources)
+                if essay:
+                    # Chunk the essay to mimic streaming response
+                    chunk_size = 20  # Characters per chunk
+                    delay = 0.01  # Seconds between chunks
+                    
+                    for i in range(0, len(essay), chunk_size):
+                        chunk = essay[i:i + chunk_size]
+                        yield chunk
+                        await asyncio.sleep(delay)  # Small delay to mimic streaming
+            else:
+                yield "❌ No research sources found\n"
+
+        except Exception as e:
+            yield f"❌ Research failed: {str(e)}\n"
+        finally:
+            if len(final_essay) > 0:
+                yield f"\n\n\n{'='* 16}\nFinal report:\n{'='* 16}\n\n{final_essay}\n\n"
+
+    async def _execute_research_task(self, task: SubTask) -> Dict:
+        """Execute a single research task with sequential tool calls"""
+        results = {"sources": [], "content": []}
+
+        # Execute each search query sequentially
+        for query in task.search_focus:
+            try:
+                # Use actual web search tool
+                search_results = await web_search(query, task.max_search_calls)
+
+                if isinstance(search_results, dict) and search_results.get(
+                    "web_results"
+                ):
+                    for result in search_results["web_results"]:
+                        if result.get("url"):
+                            results["sources"].append(result["url"])
+
+                            # Fetch content for promising URLs
+                            try:
+                                content = await web_fetch(result["url"])
+                                results["content"].append(
+                                    {
+                                        "url": result["url"],
+                                        "content": content[:2000],  # Limit content size
+                                    }
+                                )
+                            except Exception:
+                                continue
+
+            except Exception:
+                continue
+
+        return results
+
+    async def _generate_final_essay(
+        self, research_data: List[Dict], query: str, sources: List[Dict]
+    ) -> str:
+        """Generate final essay from research findings"""
+        research_summary = json.dumps(research_data, ensure_ascii=False, indent=2)
+        sources_serialized = json.dumps(sources, ensure_ascii=False, indent=2)
+        prompt = essay_prompt(research_summary, query, sources_serialized)
+        return self.client.generate_text(
+            prompt,
+            system="You are an expert academic writer",
+            model="claude-sonnet-4-20250514",
+            max_tokens=20000
+        )
+
+    async def _generate_final_essay_stream(
+        self, research_data: List[Dict], query: str, sources: List[Dict]
+    ) -> AsyncGenerator[str, None]:
+        """Stream final essay generation"""
+        research_summary = json.dumps(research_data, ensure_ascii=False, indent=2)
+        sources_serialized = json.dumps(sources, ensure_ascii=False, indent=2)
+        prompt = essay_prompt(research_summary, query, sources_serialized)
+
+        async for chunk in self.client.stream_text(
+            prompt,
+            system="You are an expert academic writer",
+            model="claude-sonnet-4-20250514",
+            max_tokens=20000
+        ):
+            yield chunk
 
     def _parse_and_validate(self, raw_response: str | dict) -> TaskPlan:
+        # claude-3-7-sonnet-20250219 | claude-sonnet-4-20250514 | claude-opus-4-1-20250805
         """
         Parse LLM output into a TaskPlan and validate structure/rules.
         Raises TaskDecompositionError on any failure.
@@ -74,10 +185,7 @@ class ResearchOrchestrator:
                     search_focus=st.get("search_queries", []),
                     expected_output=st["expected_output"],
                     priority=st["priority"],
-                    max_search_calls=min(
-                        st.get("max_searches", 1),
-                        self.MAX_SEARCHES_PER_AGENT,
-                    ),
+                    max_search_calls=min(st.get("max_searches", 1), self.MAX_SUBAGENTS),
                 )
             )
 
@@ -92,198 +200,11 @@ class ResearchOrchestrator:
             complexity_score=plan_dict.get("complexity", 1),
         )
 
-    def analyze_query(self, query: str):
-        plan_json = plan(query=query, current_date=datetime.date.today())
-        raw = self.client.stream_synchronous(query, plan_json)
-        return self._parse_and_validate(raw)
-
     def get_article_text(self, url: str):
         article = Article(url)
         article.download()
         article.parse()
         return article.text
-
-    async def execute_research(
-        self,
-        query: str,
-    ) -> AsyncGenerator[Any, Any]:
-        """Main research flow with programatic tool-calling"""
-        task_plan = self.analyze_query(query)
-        agent_results = []
-        articles = []
-        sources = []
-        for task in task_plan.subtasks:
-            agent = SearchBot(task)
-            try:
-                async for result in agent._execute():
-                    if not isinstance(result, dict):
-                        print(f"[WARN] unexpected subagent result type: {type(result)}. Skipping.")
-                    status = result.get("status", "error")
-                    if status != "completed":
-                        print(
-                            f"[WARN] subagent {task.id} returned status={status}; error={res.get('error')!r}"
-                        )
-                    maybe = result.get("final_response")
-                    if maybe:
-                        agent_results.append(maybe)
-                        continue
-                    final = result.get("final_response")
-                    if final is not None:
-                        agent_results.append(final)
-                        if isinstance(final, dict) and final.get("sources"):
-                            for url in final.get("sources", []):
-                                if url not in sources:
-                                    sources.append(url)
-                        convo = result.get("raw_conversation") or result.get("conversation")
-                        if convo and isinstance(convo, list):
-                            try:
-                                self.record_memories(convo)
-                            except Exception as e:
-                                print(f"[WARN] record_memories failed: {e}")
-                                continue
-            except Exception as e:
-                print(f"[ERROR] subagent {task.id} crashed: {e}", flush=True)
-                continue
-            # print(f"ran SearchBot on task: {task.id}")
-            # print(f"{'=' * 20}\nsubagent result: {res}\n")
-            
- 
-        if len(sources) and len(sources) > 0:
-            for url in list(sources):
-                try:
-                    text = self.get_article_text(url)
-                except Exception as e:
-                    print(f"[WARN] failed to fetch article {url}: {e}")
-                    text = ""
-                articles.append({"link": url, "text": text})
-            research_findings_serialized = json.dumps(
-                agent_results, ensure_ascii=False, indent=2
-            )
-            orchestration_prompt = f"""
-            You are tasked with writing a comprehensive essay based on a given query and research findings. Your goal is to provide a detailed, impartial, and informative response that addresses the query in depth. Follow these instructions carefully:
-
-            First, review the following research findings:
-
-            <research_findings>{research_findings_serialized}
-            </research_findings>
-
-
-            Now, carefully analyze the query:
-
-            <query>
-            {query}
-            </query>
-
-            Before writing your essay, consider the following:
-
-            1. Identify the main topics and subtopics related to the query.
-            2. Organize the research findings into relevant categories.
-            3. Look for connections, patterns, or contradictions in the data.
-            4. Determine the most important and relevant information to include.
-
-            Structure your essay as follows:
-
-            1. Introduction: Briefly introduce the topic and provide context for the query.
-            2. Main body: Divide this section into relevant subsections, each addressing a key aspect of the query.
-            3. Conclusion: Summarize the main points and provide a balanced overview of the findings.
-
-            When writing your essay:
-
-            1. Remain objective and impartial throughout.
-            2. Use clear, concise language appropriate for an academic or professional audience.
-            3. Provide specific examples, data, and quotes from the research findings to support your points.
-            4. Address any conflicting information or perspectives found in the research.
-            5. Ensure a logical flow of ideas between paragraphs and sections.
-            6. Use transitional phrases to connect ideas and improve readability.
-
-            if you would like to see any result's full article text, you can find the article's full text via __item__.text in <articles>{articles}</articles>
-
-            Citations and references:
-            from these sources: {sources}
-            1. Use in-text citations whenever you reference information from the research findings.
-            2. Format citations as [Source X], where X is the number of the source as listed in the research findings.
-            3. If quoting directly, use quotation marks and include the source number.
-
-            Output your essay within <essay> tags. After the essay, provide a list of all sources cited within <sources> tags.
-
-            Important: DO NOT include points as bullets or numbered lists within the essay, the correct format is as if writing an academic paper. If you find yourself tempted to take shortcuts or use shorthand, remember that you are writing for completion and thoroughness.
-
-            Remember to thoroughly address the query, providing a comprehensive and detailed response that synthesizes the information from the research findings.
-            """
-            async for res in self.client.call_llm_with_tools(
-                orchestration_prompt,
-                system="You are an expert academic writer",
-                tools=[],
-                model="claude-3-7-sonnet-20250219",
-                max_tokens=16000,
-                timeout=600,
-            ):
-                yield res
-                return
-        # claude-3-7-sonnet-20250219 | claude-sonnet-4-20250514 | claude-opus-4-1-20250805
-        #
-        #
-                # if not isinstance(res, dict):
-                #     print("[ERROR] orchestrator returned non-dict response:", res)
-                #     fin = {
-                #         "status": "error",
-                #         "final_response": None,
-                #         "raw_conversation": [],
-                #         "error": "orchestrator_returned_non_dict",
-                #     }
-                #     yield fin
-                #     return
-                # final_response = res.get("final_response") or res.get("response") or ""
-                # raw_conv = res.get("raw_conversation") or res.get("conversation") or []
-                # err = res.get("error")
-
-                # print("FINAL RAW CONVERSATION:", raw_conv)
-                # print("FINAL ERROR:", err)
-
-                # if raw_conv:
-                #     try:
-                #         self.record_memories(raw_conv)
-                #     except Exception as e:
-                #         print(f"[WARN] record_memories failed after orchestrator: {e}")
-                # final_final = {
-                #     "status": res.get("status", "completed" if final_response else "error"),
-                #     "final_response": final_response,
-                #     "raw_conversation": raw_conv,
-                #     "error": err,
-                #     "tool_calls_used": res.get(
-                #         "tool_calls_count", res.get("tool_calls_used", 0)
-                #     ),
-                # }
-                # yield final_final
-                # return
-
-    def record_memories(self, conversation):
-        """
-        Append conversation messages to self.memory and append a small human-readable log file.
-        conversation: list of message dicts, each message has 'role' and 'content' (content is usually a list of blocks).
-        """
-        if not conversation:
-            return "no conversation"
-        self.memory.extend(conversation)
-        try:
-            with open("output.txt", "a", encoding="utf-8") as f:
-                f.write(
-                    f"\n--- memory dump at {datetime.datetime.utcnow().isoformat()} ---\n"
-                )
-                f.write(f"total memory length: {len(self.memory)}\n")
-                for i, message in enumerate(conversation, start=1):
-                    role = message.get("role", "unknown")
-                    content = message.get("content")
-                    try:
-                        content_preview = json.dumps(content, ensure_ascii=False)
-                    except Exception:
-                        content_preview = repr(content)
-                    if len(content_preview) > 1000:
-                        content_preview = content_preview[:1000] + " ...[truncated]"
-                    f.write(f"{i}. role={role} content={content_preview}\n")
-        except Exception as e:
-            print(f"[WARN] Failed to write memory file: {e}")
-        return "done"
 
 
 qs = [
@@ -295,16 +216,19 @@ qs = [
     # "What are some low-overhead side-business ideas for a busy grad student looking to generate passive income?",
     # "How fast will AI replace econometric modelers?",
     "delicious new york style pizza sauce recipe historical approaches",
+    "what are the best treatments for hypermobile Ehlers Danlos Syndrome?"
     # "do caterpillars notice humans and interact with them with curiosity?"
 ]
 
 
 async def main():
     orchestrator = ResearchOrchestrator()
-    result = await orchestrator.execute_research(qs[random.randint(0, len(qs) - 1)])
-    if result:
-        print(f"final_response in result from main: {result['final_response']}")
-        return result
+    async for result in orchestrator.execute_research(
+        qs[random.randint(0, len(qs) - 1)]
+    ):
+        if result:
+            print(f"final_response in result from main: {result}")
+            return result
 
 
 if __name__ == "__main__":

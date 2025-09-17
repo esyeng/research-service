@@ -146,7 +146,7 @@ def plan(**kwargs) -> str:
     Instructions:
     - Categorize query type: straightforward, breadth_first, depth_first
     - Assign complexity score (1-3)
-    - Generate subtasks (1-4) with clear boundaries, max searches, expected outputs
+    - Generate subtasks (1-3) with clear boundaries, max searches, expected outputs
     - Ensure zero overlap between subtask scopes
 
     query types with explanation (enum values) ->
@@ -194,7 +194,7 @@ def plan(**kwargs) -> str:
                 "scope": "Clear boundaries of what to research",
                 "search_queries": ["suggested", "search", "terms"],
                 "expected_output": "What success looks like",
-                "max_searches": 5,
+                "max_searches": 3,
                 "priority": "high|medium|low"
             }}
         ]
@@ -205,6 +205,58 @@ def plan(**kwargs) -> str:
         return prompt.format(**kwargs)
     except KeyError as e:
         raise ValueError(f"Missing required prompt variable: {e}")
+
+
+def essay_prompt(research_findings: str, original_query: str, sources: str):
+    return f"""
+            You are tasked with writing a comprehensive essay based on a given query and research findings. Your goal is to provide a detailed, impartial, and informative response that addresses the query in depth. Follow these instructions carefully:
+
+            First, review the following research findings:
+
+            <research_findings>{research_findings}
+            </research_findings>
+
+            Now, carefully analyze the query:
+
+            <query>
+            {original_query}
+            </query>
+
+            Before writing your essay, consider the following:
+
+            1. Identify the main topics and subtopics related to the query.
+            2. Organize the research findings into relevant categories.
+            3. Look for connections, patterns, or contradictions in the data.
+            4. Determine the most important and relevant information to include.
+
+            Structure your essay as follows:
+
+            1. Introduction: Briefly introduce the topic and provide context for the query.
+            2. Main body: Divide this section into relevant subsections, each addressing a key aspect of the query.
+            3. Conclusion: Summarize the main points and provide a balanced overview of the findings.
+
+            When writing your essay:
+
+            1. Remain objective and impartial throughout.
+            2. Use clear, concise language appropriate for an academic or professional audience.
+            3. Provide specific examples, data, and quotes from the research findings to support your points.
+            4. Address any conflicting information or perspectives found in the research.
+            5. Ensure a logical flow of ideas between paragraphs and sections.
+            6. Use transitional phrases to connect ideas and improve readability.
+
+            Citations and references:
+            from these sources: {sources}
+            1. Use in-text citations whenever you reference information from the research findings.
+            2. Format citations as [Source X], where X is the number of the source as listed in the research findings.
+            3. If quoting directly, use quotation marks and include the source number.
+
+            Output your essay within <essay> tags. After the essay, provide a list of all sources cited within <sources> tags.
+
+            Important: DO NOT include points as bullets or numbered lists within the essay, the correct format is as if writing an academic paper. If you find yourself tempted to take shortcuts or use shorthand, remember that you are writing for completion and thoroughness.
+
+            Remember to thoroughly address the query, providing a comprehensive and detailed response that synthesizes the information from the research findings.
+            """
+
 
 
 def pretty(title, ugly_report: dict) -> None:

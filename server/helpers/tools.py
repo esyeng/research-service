@@ -2,9 +2,9 @@ import os
 import aiohttp
 import httpx
 import json
-from typing import List
+from typing import List, Dict, Any
 from .data_methods import prune_brave_search_json
-from ..utils.types import SubTaskResult
+from utils.types import SubTaskResult
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -26,57 +26,60 @@ API_HEADERS = {
 
 
 async def web_fetch(url: str) -> str:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            if resp.status != 200:
-                raise RuntimeError(f"Fetch failed {resp.status} for {url}")
-            return await resp.text()
+    """
+    Fetch complete webpage content from a URL.
+    Returns plain text content of the webpage.
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"Fetch failed {resp.status} for {url}")
+                return await resp.text()
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch {url}: {str(e)}")
 
 
 async def web_search(
     query: str,
     max_results: int = 10,
-) -> str:
-    """Direct web search capability using Brave Search API for orchestrator"""
+) -> Dict[str, Any]:
+    """
+    Search the web using Brave Search API.
+    Returns structured data with search results.
+    """
     params = {"q": query, "count": max_results, "country": "us", "search_lang": "en"}
-    print(f"\n\n!! WE FINNA SEARCH UP THIS SHIEE -~-~> {query}")
-    async with aiohttp.ClientSession() as session:
-        async with session.get(API_URL, headers=API_HEADERS, params=params) as resp:
-            print('raw')
-            raw = await resp.json()
-            print(raw)
-            data = prune_brave_search_json(raw, 5)
-            if resp.status != 200:
-                raise RuntimeError(f"Brave Search API error {resp.status}: {data}")
-            return json.dumps(data)
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                API_URL,
+                headers=API_HEADERS,
+                params=params,
+            ) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    raise RuntimeError(
+                        f"Brave Search API error {resp.status}: {error_text}"
+                    )
+
+                raw_data = await resp.json()
+                return prune_brave_search_json(raw_data, max_results)
+
+    except Exception as e:
+        raise RuntimeError(f"Web search failed for query '{query}': {str(e)}")
 
 
-def complete_task(
-    insights: str,
-    findings: List[str],
-    sources: List[str],
-    confidence: float = 0.8,
-):
-    print(f"running complete_task")
-    return SubTaskResult(
-        task_complete=True,
-        insights=insights,
-        findings=findings,
-        sources=sources,
-        confidence=confidence,
-    )
-
-
-async def wikipedia(q):
-    print(f"about to search wikipedia w/query: {q}")
-    async with httpx.AsyncClient() as client:
-        result = await client.get(
-            "https://en.wikipedia.org/w/api.php",
-            params={
-                "action": "query",
-                "list": "search",
-                "srsearch": q,
-                "format": "json",
-            },
-        )
-    return result.json()["query"]["search"][0]["snippet"]
+async def check_search_health() -> bool:
+    """Check if the Brave Search API is accessible"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                API_URL,
+                headers=API_HEADERS,
+                params={"q": "test", "count": 1},
+                timeout=10,
+            ) as resp:
+                return resp.status == 200
+    except:
+        return False
