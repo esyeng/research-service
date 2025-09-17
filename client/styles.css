@@ -1,6 +1,5 @@
 /* === GLOBAL RESET === */
 :root {
-    /* 🎨 Easily change these values */
     --bg-color: #0d000d;
     /* background base */
     --text-color: #ffffff;
@@ -129,7 +128,7 @@ body::after {
     border-radius: 3px;
 }
 
-/* Optional: tighten chat-container layout so window looks framed */
+/* tighten chat-container layout so window looks framed */
 .chat-container {
     max-width: 900px;
     margin: 0 auto;
@@ -167,6 +166,116 @@ body::after {
     color: #e9d5ff;
     border-bottom-left-radius: 0.4rem;
     backdrop-filter: blur(6px);
+}
+
+/* Markdown content styling */
+.message.bot h1,
+.message.bot h2,
+.message.bot h3,
+.message.bot h4,
+.message.bot h5,
+.message.bot h6 {
+    margin: 1rem 0 0.5rem 0;
+    color: #ffffff;
+    font-weight: 600;
+}
+
+.message.bot p {
+    margin: 0.5rem 0;
+    line-height: 1.6;
+}
+
+.message.bot ul,
+.message.bot ol {
+    margin: 0.5rem 0;
+    padding-left: 1.5rem;
+}
+
+.message.bot li {
+    margin: 0.25rem 0;
+}
+
+.message.bot blockquote {
+    border-left: 4px solid var(--accent-color);
+    padding-left: 1rem;
+    margin: 1rem 0;
+    color: #cccccc;
+    font-style: italic;
+}
+
+.message.bot code {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 0.2rem 0.4rem;
+    border-radius: 0.3rem;
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    font-size: 0.85em;
+}
+
+.message.bot pre {
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 0.5rem;
+    padding: 1rem;
+    margin: 1rem 0;
+    overflow-x: auto;
+    position: relative;
+}
+
+.message.bot pre code {
+    background: transparent;
+    padding: 0;
+    border-radius: 0;
+    font-size: 0.9em;
+    line-height: 1.4;
+}
+
+/* Copy button styling */
+.copy-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    padding: 4px 8px;
+    font-size: 12px;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    color: white;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.copy-btn:hover {
+    background: rgba(255, 255, 255, 0.2);
+    transform: translateY(-1px);
+}
+
+/* Table styling */
+.message.bot table {
+    border-collapse: collapse;
+    margin: 1rem 0;
+    width: 100%;
+}
+
+.message.bot th,
+.message.bot td {
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    padding: 0.5rem;
+    text-align: left;
+}
+
+.message.bot th {
+    background: rgba(255, 255, 255, 0.1);
+    font-weight: 600;
+}
+
+/* Link styling */
+.message.bot a {
+    color: var(--accent-color);
+    text-decoration: none;
+}
+
+.message.bot a:hover {
+    text-decoration: underline;
 }
 
 /* === INPUT AREA === */
@@ -237,5 +346,14 @@ body::after {
     .input-area button {
         padding: 0.5rem 0.8rem;
         font-size: 0.85rem;
+    }
+
+    .message.bot pre {
+        padding: 0.75rem;
+        margin: 0.75rem 0;
+    }
+
+    .message.bot pre code {
+        font-size: 0.8em;
     }
 }
