@@ -24,7 +24,7 @@ class LLMClient:
         self._async = AsyncAnthropic(
             api_key=ANTHROPIC_API_KEY,
             http_client=httpx.AsyncClient(),
-            timeout=httpx.Timeout(60.0, read=5.0, write=10.0, connect=2.0),
+            timeout=httpx.Timeout(60.0, read=5.0, write=10.0, connect=10.0),
         )
 
     async def stream_text(
@@ -32,7 +32,7 @@ class LLMClient:
         prompt: str,
         system: str = "You are a helpful assistant",
         model: str = "claude-3-7-sonnet-20250219",
-        max_tokens: int = 4000,
+        max_tokens: int = 6000,
     ) -> AsyncGenerator[str, None]:
         """
         Asynchronous text streaming without tool usage.
@@ -61,7 +61,7 @@ class LLMClient:
         system: str,
         tools: List[Dict],
         model: str = "claude-3-7-sonnet-20250219",
-        max_tokens: int = 4000,
+        max_tokens: int = 7000,
     ) -> AsyncGenerator[str, None]:
         """
         Simplified streaming with sequential tool execution.
@@ -210,7 +210,7 @@ class LLMClient:
         prompt: str,
         system: str = "You are a helpful assistant",
         model: str = "claude-3-7-sonnet-20250219",
-        max_tokens: int = 4000,
+        max_tokens: int = 8000,
     ) -> str:
         """Synchronous text generation for final outputs"""
         from anthropic import Anthropic

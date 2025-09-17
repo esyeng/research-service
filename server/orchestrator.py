@@ -11,7 +11,7 @@ from typing import AsyncGenerator, Any, List, Dict
 
 
 class ResearchOrchestrator:
-    MAX_SUBAGENTS = 5
+    MAX_SUBAGENTS = 4
 
     def __init__(self):
         self.client = LLMClient()
@@ -53,7 +53,7 @@ class ResearchOrchestrator:
 
                 task_result = await self._execute_research_task(task)
                 research_data.append(task_result)
-                srcs = task_result.get('sources', [])
+                srcs = task_result.get("sources", [])
 
                 yield f"\n\n✅ Task {i} complete: {len(srcs)} sources found.\n\nSources:\n\n[\n\n"
                 for src in srcs:
@@ -75,9 +75,9 @@ class ResearchOrchestrator:
                     # Chunk the essay to mimic streaming response
                     chunk_size = 20  # Characters per chunk
                     delay = 0.01  # Seconds between chunks
-                    
+
                     for i in range(0, len(essay), chunk_size):
-                        chunk = essay[i:i + chunk_size]
+                        chunk = essay[i : i + chunk_size]
                         yield chunk
                         await asyncio.sleep(delay)  # Small delay to mimic streaming
             else:
@@ -134,7 +134,7 @@ class ResearchOrchestrator:
             prompt,
             system="You are an expert academic writer",
             model="claude-sonnet-4-20250514",
-            max_tokens=20000
+            max_tokens=20000,
         )
 
     async def _generate_final_essay_stream(
@@ -149,7 +149,7 @@ class ResearchOrchestrator:
             prompt,
             system="You are an expert academic writer",
             model="claude-sonnet-4-20250514",
-            max_tokens=20000
+            max_tokens=20000,
         ):
             yield chunk
 
@@ -217,7 +217,9 @@ qs = [
     # "How fast will AI replace econometric modelers?",
     "delicious new york style pizza sauce recipe historical approaches",
     "what are the best treatments for hypermobile Ehlers Danlos Syndrome?"
-    # "do caterpillars notice humans and interact with them with curiosity?"
+    # "do caterpillars notice humans and interact with them with curiosity?",
+    "I want to go back to school to pursue a Masters Degree (or PhD potentially if relevant) in the intersection of my professional interests. My interests are: Human-Inspired Artificial Intelligence, Applied AI in Neuroscience & Robotics research, AI Engineering, Computational Linguistics, AI Ethics & Alignment. I would likely want to do an online program but am open to in person, and I want to explore options both within and outside of the continental US. What are my options? Please include degree types, cost estimates, admission requirements, and required pre-requisite courses for students without STEM/CS background",
+    "are there any scholarships available for prospective students applying to online programs in Master of Science in any( Computational Linguistics, Master of Engineering in Artificial Intelligence & Machine Learning, Master of Science in Artificial Intelligence, MS in AI Ethics and Society) worth applying to? How about for Women? LGBTQ / Trans Women? Non-tech background students? students with ADHD and/or chronic pain? Low-income students?"
 ]
 
 
