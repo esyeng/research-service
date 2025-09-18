@@ -7,18 +7,25 @@ from helpers.tools import web_search, web_fetch
 from helpers.data_methods import plan, essay_prompt, extract_json_from_markdown
 from utils.types import SubTask, TaskPlan, TaskDecompositionError
 from newspaper import Article
-from typing import AsyncGenerator, Any, List, Dict
+from typing import AsyncGenerator, Any, List, Dict, Callable
 
 
 class ResearchOrchestrator:
-    MAX_SUBAGENTS = 4
-
-    def __init__(self):
+    def __init__(self, max_subagents: int, prompt_method: Callable):
         self.client = LLMClient()
+        self.MAX_SUBAGENTS = max_subagents
+        self.prompt_method = prompt_method
 
-    def analyze_query(self, query: str) -> TaskPlan:
+    def analyze_query(
+        self, query: str, number_subtasks_to_run: int, max_searches_per_task: int
+    ) -> TaskPlan:
         """Analyze query and create research plan"""
-        plan_json = plan(query=query, current_date=datetime.date.today())
+        plan_json = plan(
+            query=query,
+            current_date=datetime.date.today(),
+            number_subtasks_to_run=number_subtasks_to_run,
+            max_searches_per_task=max_searches_per_task,
+        )
         raw = self.client.generate_text(plan_json, "You are an expert research planner")
         return self._parse_and_validate(raw)
 
@@ -30,11 +37,37 @@ class ResearchOrchestrator:
         ):
             full_response += chunk
             yield chunk
-        # Just yield completion message, don't parse here
-        # yield f"\n✅ Plan analysis complete\n"
 
-    async def execute_research(self, query: str) -> AsyncGenerator[str, None]:
-        """Simplified sequential research execution"""
+    async def execute_research_sync(self, query: str, n_tasks: int, max_searches: int):
+        """equential research execution that only returns final result"""
+        final_essay = ""
+        try:
+            print("run synchronous researcher")
+            task_plan = self.analyze_query(query, n_tasks, max_searches)
+            if task_plan:
+                print("task plan generated, executing tasks...")
+            research_data = []
+            sources = []
+
+            for i, task in enumerate(task_plan.subtasks, 1):
+                print(f"executing task {i}/{len(task_plan.subtasks)}: {task.objective}")
+                task_result = await self._execute_research_task(task)
+                research_data.append(task_result)
+            if any(result.get("sources") for result in research_data):
+                for result in research_data:
+                    sources.append(*result.get("sources", []))
+                print("research complete, writing essay...")
+                essay = await self._generate_final_essay(research_data, query, sources)
+                if essay:
+                    final_essay = essay
+            return final_essay
+        except Exception as e:
+            print(f"❌ Research failed: {str(e)}\n")
+
+    async def execute_research(
+        self, query: str, n_tasks: int, max_searches: int
+    ) -> AsyncGenerator[str, None]:
+        """Simplified sequential research execution that yields results as it runs"""
         final_essay = ""
         try:
             # 1. Announce start
@@ -42,7 +75,7 @@ class ResearchOrchestrator:
 
             # 2. Create research plan
             yield "\n\n📋 Creating research plan...\n"
-            task_plan = self.analyze_query(query)
+            task_plan = self.analyze_query(query, n_tasks, max_searches)
             if task_plan.strategy:
                 yield f"\n\n💭 Strategy:\n --> {task_plan.strategy}\n\n"
             research_data = []
@@ -124,12 +157,16 @@ class ResearchOrchestrator:
         return results
 
     async def _generate_final_essay(
-        self, research_data: List[Dict], query: str, sources: List[Dict]
+        self,
+        research_data: List[Dict],
+        query: str,
+        sources: List[Dict],
     ) -> str:
         """Generate final essay from research findings"""
         research_summary = json.dumps(research_data, ensure_ascii=False, indent=2)
         sources_serialized = json.dumps(sources, ensure_ascii=False, indent=2)
-        prompt = essay_prompt(research_summary, query, sources_serialized)
+        prompt = self.prompt_method(research_summary, query, sources_serialized)
+        # claude-opus-4-1-20250805
         return self.client.generate_text(
             prompt,
             system="You are an expert academic writer",
@@ -219,14 +256,14 @@ qs = [
     "what are the best treatments for hypermobile Ehlers Danlos Syndrome?"
     # "do caterpillars notice humans and interact with them with curiosity?",
     "I want to go back to school to pursue a Masters Degree (or PhD potentially if relevant) in the intersection of my professional interests. My interests are: Human-Inspired Artificial Intelligence, Applied AI in Neuroscience & Robotics research, AI Engineering, Computational Linguistics, AI Ethics & Alignment. I would likely want to do an online program but am open to in person, and I want to explore options both within and outside of the continental US. What are my options? Please include degree types, cost estimates, admission requirements, and required pre-requisite courses for students without STEM/CS background",
-    "are there any scholarships available for prospective students applying to online programs in Master of Science in any( Computational Linguistics, Master of Engineering in Artificial Intelligence & Machine Learning, Master of Science in Artificial Intelligence, MS in AI Ethics and Society) worth applying to? How about for Women? LGBTQ / Trans Women? Non-tech background students? students with ADHD and/or chronic pain? Low-income students?"
+    "are there any scholarships available for prospective students applying to online programs in Master of Science in any( Computational Linguistics, Master of Engineering in Artificial Intelligence & Machine Learning, Master of Science in Artificial Intelligence, MS in AI Ethics and Society) worth applying to? How about for Women? LGBTQ / Trans Women? Non-tech background students? students with ADHD and/or chronic pain? Low-income students?",
 ]
 
 
 async def main():
-    orchestrator = ResearchOrchestrator()
+    orchestrator = ResearchOrchestrator(4, essay_prompt) # essay writer instance
     async for result in orchestrator.execute_research(
-        qs[random.randint(0, len(qs) - 1)]
+        qs[random.randint(0, len(qs) - 1)], 3, 3
     ):
         if result:
             print(f"final_response in result from main: {result}")

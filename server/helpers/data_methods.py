@@ -1,12 +1,66 @@
 import re
 import json
+from datetime import datetime, timedelta
+
 from typing import List, Dict, Any, Optional, Union
 
 
-def extract_xml(text: str, tag: str) -> str:
-    match = re.search(f"<{tag}>(.*?)</{tag}>", text, re.DOTALL)
-    return match.group(1) if match else ""
 
+def extract_xml(text: str, tag: str) -> str:
+    """
+    Extract content between XML tags, handling both properly closed tags and unclosed tags.
+    
+    For properly closed tags: <tag>content</tag>
+    For unclosed tags: <tag>content<tag> (treats the second opening tag as closing)
+    
+    Args:
+        text: The text containing XML tags
+        tag: The tag name to extract content from
+        
+    Returns:
+        The extracted content or empty string if no match found
+    """
+    # First try to find properly closed tags
+    closed_pattern = f"<{tag}>(.*?)</{tag}>"
+    closed_match = re.search(closed_pattern, text, re.DOTALL)
+    if closed_match:
+        return closed_match.group(1)
+    
+    # If no properly closed tags, look for unclosed tags pattern
+    unclosed_pattern = f"<{tag}>(.*?)<{tag}>"
+    unclosed_match = re.search(unclosed_pattern, text, re.DOTALL)
+    if unclosed_match:
+        return unclosed_match.group(1)
+    
+    # If neither pattern matches, return empty string
+    return ""
+
+
+def extract_all_xml(text: str, tag: str) -> List[str]:
+    """
+    Extract all occurrences of content between XML tags, handling both properly closed 
+    and unclosed tags.
+    
+    Args:
+        text: The text containing XML tags
+        tag: The tag name to extract content from
+        
+    Returns:
+        List of extracted content strings
+    """
+    results = []
+    
+    # Find all properly closed tags
+    closed_pattern = f"<{tag}>(.*?)</{tag}>"
+    for match in re.finditer(closed_pattern, text, re.DOTALL):
+        results.append(match.group(1))
+    
+    # Find all unclosed tags pattern
+    unclosed_pattern = f"<{tag}>(.*?)<{tag}>"
+    for match in re.finditer(unclosed_pattern, text, re.DOTALL):
+        results.append(match.group(1))
+    
+    return results
 
 def extract_json_from_markdown(raw_response: str) -> dict:
     match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw_response, re.DOTALL)
@@ -146,7 +200,7 @@ def plan(**kwargs) -> str:
     Instructions:
     - Categorize query type: straightforward, breadth_first, depth_first
     - Assign complexity score (1-3)
-    - Generate subtasks (1-3) with clear boundaries, max searches, expected outputs
+    - Generate {number_subtasks_to_run} subtasks with clear boundaries, {max_searches_per_task} max searches, expected outputs
     - Ensure zero overlap between subtask scopes
 
     query types with explanation (enum values) ->
@@ -207,7 +261,7 @@ def plan(**kwargs) -> str:
         raise ValueError(f"Missing required prompt variable: {e}")
 
 
-def essay_prompt(research_findings: str, original_query: str, sources: str):
+def essay_prompt(research_findings: str, original_query: str, sources: str) -> str:
     return f"""
             You are tasked with writing a comprehensive essay based on a given query and research findings. Your goal is to provide a detailed, impartial, and informative response that addresses the query in depth. Follow these instructions carefully:
 
@@ -258,9 +312,75 @@ def essay_prompt(research_findings: str, original_query: str, sources: str):
             """
 
 
+def market_report_prompt(
+    research_findings: str, original_query: str, sources: str
+) -> str:
+    current_date = datetime.now().date()
+    return f"""You are tasked with generating a comprehensive weekly market analysis report based on current research findings about specific job roles/professions. This report is part of a personalized ongoing weekly analysis series designed to provide one specific job seeker with timely, data-driven insights and actionable strategies based on the most recent market developments from the past seven days.
+Weekly Analysis Context:
+
+This report represents your analysis for the week ending {current_date}. As part of our weekly reporting cycle, focus on highlighting what has changed, emerged, or become particularly relevant during this specific week, while maintaining awareness that readers may have accessed previous weekly reports.
+Research findings from this week:
+
+<research_findings>{research_findings}
+</research_findings>
+
+Original query context:
+<query>
+{original_query}
+</query>
+
+Pre-Writing Analysis Framework:
+Before composing this week's report, analyze the current week's research to identify:
+
+This Week's Market Movements: New developments, shifts in demand, and any notable changes from recent weeks
+Current Skills Emphasis: Which competencies gained or lost prominence in job postings this week
+Compensation Updates: Any new salary data, bonus structures, or geographic variations observed this week
+Active Hiring Sectors: Industries showing increased or decreased activity in the current week
+Emerging Trends: Technologies, methodologies, or requirements that appeared or accelerated this week
+Immediate Challenges: New obstacles or opportunities that job seekers should address this week
+
+Required Report Structure:
+Your analysis must follow this academic essay format with five substantive sections:
+
+WEEKLY MARKET OVERVIEW: Synthesize this week's job market conditions, emphasizing what distinguishes the current week from recent periods, including any shifts in demand, notable company announcements, or industry developments
+CURRENT REQUIREMENTS ANALYSIS: Detail the skills, qualifications, and experience that employers prioritized in this week's postings, noting any evolution from previous weeks
+THIS WEEK'S COMPETITIVE LANDSCAPE: Analyze the current competitive environment based on this week's data, identifying what successful candidates are demonstrating and immediate challenges seekers face
+TIMELY ACTION STRATEGIES: Provide specific steps job seekers should take this week and in the immediate future to capitalize on current opportunities
+FORWARD-LOOKING RECOMMENDATIONS: Based on this week's trends, offer strategic advice for positioning in the coming weeks and months
+
+Writing Guidelines:
+Compose your report as a formal academic essay with:
+
+Introduction: Frame this week's analysis within the current market context and the specific query focus
+Main Body: Develop each of the five sections as complete paragraphs with thorough analysis, smooth transitions, and evidence-based arguments
+Conclusion: Synthesize this week's key findings and their implications for immediate and near-term job search strategies
+
+Critical Requirements:
+
+Write in complete paragraphs with academic prose—no bullet points, numbered lists, or shorthand
+Support all claims with specific data, examples, and quotations from this week's research
+Address any contradictions or shifts from expected patterns observed this week
+Ensure logical flow between paragraphs using transitional phrases that maintain weekly context
+Remain objective while providing actionable insights
+
+Citation Protocol:
+
+Use in-text citations formatted as [Source X] corresponding to sources listed
+Include quotation marks for direct quotes with source attribution
+Reference these sources: {sources}
+
+Output Format:
+Present your complete weekly analysis as markdown within <essay> tags, followed by a comprehensive source list within <sources> tags.
+Remember: This is a weekly intelligence product.
+Maintain temporal awareness by using phrases like "this week," "in the current period," "recent developments," and "emerging this week"
+Address the user directly, and feel free to adopt a slightly more conversational and wry tone when speaking directly to the user but keep it professional. Sparingly applying dry wit is appreciated.
+Readers depend on your thorough, timely analysis to make immediate career decisions. 
+The value of this report lies in its currency and specificity to this week's market conditions. Write with the understanding that job seekers will use this information to adjust their strategies in real-time.
+        """
+
 
 def pretty(title, ugly_report: dict) -> None:
-    """Nicely formats and prints a PCOS dietary/nutrition report dictionary."""
     sources = ugly_report.get("sources", [])
     print("\n" + "=" * 70)
     print(f"\n -- 📋 {title} -- ")
@@ -278,7 +398,6 @@ def pretty(title, ugly_report: dict) -> None:
 
 def to_markdown(data: Union[str, dict, list]) -> str:
     """Cleans and formats any JSON, string, dict, or list input into readable Markdown"""
-
     def format_dict(d: dict, indent: int = 0) -> str:
         md = []
         space = "  " * indent
