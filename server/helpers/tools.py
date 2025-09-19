@@ -1,10 +1,7 @@
 import os
 import aiohttp
-import httpx
-import json
-from typing import List, Dict, Any
+from typing import Dict, Any
 from .data_methods import prune_brave_search_json
-from utils.types import SubTaskResult
 from dotenv import load_dotenv
 
 load_dotenv()

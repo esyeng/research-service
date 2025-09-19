@@ -4,3 +4,7 @@ pytest
 pytest-asyncio
 aiohttp
 fastapi
+markdown
+reportlab
+tqdm
+newspaper3k
