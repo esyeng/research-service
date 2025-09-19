@@ -9,12 +9,15 @@ on:
 jobs:
     run-researcher:
         runs-on: ubuntu-latest
+        environment: research-service
         env:
             EMAIL_USER: ${{ secrets.EMAIL_USER }}
             EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
             EMAIL_TO: ${{ secrets.EMAIL_TO }}
             NAME_USER: ${{ secrets.NAME_USER }}
             NAME_TO: ${{ secrets.NAME_TO }}
+            ANTHROPIC_API_KEY: ${{ vars.ANTHROPIC_API_KEY }}
+            BRAVE_SEARCH_API_KEY: ${{ vars.BRAVE_SEARCH_API_KEY }}
         steps:
           - uses: actions/checkout@v4
           - uses: actions/setup-python@v5
@@ -26,6 +29,8 @@ jobs:
               EMAIL_USER: ${{ secrets.EMAIL_USER }}
               EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
               EMAIL_TO:   ${{ secrets.EMAIL_TO }}
-              NAME_USER:  ${{ secrets.NAME_USER }}   # or vars.NAME_USER if you saved it as a variable
-              NAME_TO:    ${{ secrets.NAME_TO }}     # same comment as above
+              NAME_USER:  ${{ secrets.NAME_USER }}  
+              NAME_TO:    ${{ secrets.NAME_TO }}     
+              ANTHROPIC_API_KEY: ${{ vars.ANTHROPIC_API_KEY }}
+              BRAVE_SEARCH_API_KEY: ${{ vars.BRAVE_SEARCH_API_KEY }}
             run: python server/job-report.py
