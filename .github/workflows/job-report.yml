@@ -19,7 +19,7 @@ jobs:
                 python-version: "3.11"
             
             - name: Change to server directory
-              run: cd server
+              run: cd ./server
             
             - name: Install dependencies
               run: pip install -r requirements.txt
