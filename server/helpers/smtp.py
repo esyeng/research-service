@@ -5,6 +5,21 @@ from typing import List
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def require_env(name: str) -> str:
+    v = os.getenv(name)
+    if v is None or not v.strip():
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return v.strip()
+
+
+EMAIL_PASS = require_env("EMAIL_PASS")
+EMAIL_USER = require_env("EMAIL_USER")
+
 
 def compose_mail(
     subject: str,
@@ -35,7 +50,9 @@ def compose_mail(
                     msg.attach(file)
                     print("msg attached")
                 except Exception as e:
-                    print(f"Error in open func creating MIMEApplication to f.read(): {e}")
+                    print(
+                        f"Error in open func creating MIMEApplication to f.read(): {e}"
+                    )
                     raise
     smtp = smtplib.SMTP("smtp.gmail.com", 587)
     try:

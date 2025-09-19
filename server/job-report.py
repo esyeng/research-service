@@ -24,7 +24,6 @@ date = datetime.now().date()
 
 
 PDF_FILENAME = f"job-market-status-report__{date}.pdf"
-EMAIL_PASS = require_env("EMAIL_PASS")
 EMAIL_USER = require_env("EMAIL_USER")
 NAME_USER = require_env("NAME_USER")
 NAME_TO = require_env("NAME_TO")
