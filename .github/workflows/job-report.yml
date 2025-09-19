@@ -21,11 +21,11 @@ jobs:
             with:
               python-version: "3.11"
           - run: cd server && pip install -r requirements.txt
-          - name: Run scraper
+          - name: Run job report
             env:
               EMAIL_USER: ${{ secrets.EMAIL_USER }}
               EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
               EMAIL_TO:   ${{ secrets.EMAIL_TO }}
               NAME_USER:  ${{ secrets.NAME_USER }}   # or vars.NAME_USER if you saved it as a variable
               NAME_TO:    ${{ secrets.NAME_TO }}     # same comment as above
-            run: python scrape-fin-data.py
+            run: python server/job-report.py
