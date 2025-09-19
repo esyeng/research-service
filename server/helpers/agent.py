@@ -1,14 +1,16 @@
 import datetime
 import asyncio
 import time
-from typing import List
-from helpers.llmclient import LLMClient
-from helpers.tools import web_search, web_fetch, complete_task
+import json
+import re
+from typing import List, AsyncGenerator, Any
+from .llmclient import LLMClient
+from .tools import web_search, web_fetch
 from utils.types import SubTask
 
 
 class SearchBot:
-    TIMEOUT = 240
+    TIMEOUT = 340
     CONVERSATION_TIMEOUT = 800
 
     def __init__(self, task: SubTask):
@@ -155,7 +157,7 @@ class SearchBot:
     def _normalize_orchestrator_result(self, res: object) -> dict:
         """
         Collapse whatever the orchestrator returned into a stable shape.
-        Handles minor field spelling issues like 'tool_calls_' vs 'tool_calls_count'.
+        Handles both streaming text chunks and final responses.
         """
         if not isinstance(res, dict):
             return {
@@ -165,17 +167,130 @@ class SearchBot:
                 "raw_conversation": [],
                 "error": None,
             }
-        tool_calls_used = res.get("tool_calls_count") or res.get("tool_calls_") or 0
-        status = "error" if res.get("error") else "completed"
+        
+        # Handle streaming text chunks
+        if "text_chunk" in res:
+            return {
+                "status": "streaming",
+                "text_chunk": res["text_chunk"],
+                "tool_calls_used": res.get("tool_calls_count", 0),
+                "raw_conversation": [],
+                "error": None,
+            }
+        
+        # Handle final responses
+        if "final_response" in res:
+            tool_calls_used = res.get("tool_calls_count", 0)
+            status = "error" if res.get("error") else "completed"
+            
+            # Extract research data from final response
+            research_data = self._extract_research_data(res)
+            
+            return {
+                "status": status,
+                "final_response": research_data or res["final_response"],
+                "tool_calls_used": tool_calls_used,
+                "raw_conversation": res.get("conversation", []),
+                "error": res.get("error"),
+                "research_data": research_data,
+            }
+        
+        # Handle error responses
+        if "error" in res:
+            return {
+                "status": "error",
+                "final_response": res.get("error"),
+                "tool_calls_used": res.get("tool_calls_count", 0),
+                "raw_conversation": [],
+                "error": res["error"],
+            }
+        
+        # Handle tool call updates
+        if "messages" in res:
+            return {
+                "status": "tool_call",
+                "final_response": None,
+                "tool_calls_used": res.get("tool_calls_count", 0),
+                "raw_conversation": res["messages"],
+                "error": None,
+            }
+        
+        # Default fallback
         return {
-            "status": status,
-            "final_response": res.get("final_response", ""),
-            "tool_calls_used": int(tool_calls_used),
-            "raw_conversation": res.get("conversation", []),
-            "error": res.get("error"),
+            "status": "completed",
+            "final_response": str(res),
+            "tool_calls_used": 0,
+            "raw_conversation": [],
+            "error": None,
         }
+        
+    def _extract_research_data(self, res_dict: dict) -> dict | None:
+        """Extract research data (sources, snippets) from tool responses and final output"""
+        research_data = {"sources": [], "snippets": []}
 
-    async def _execute(self) -> dict:
+        # Check if this is a final response with JSON data
+        if res_dict.get("final_response"):
+            final_content = res_dict["final_response"]
+            if isinstance(final_content, dict) and final_content.get("content"):
+                try:
+                    # Try to parse JSON from the final response
+                    if isinstance(final_content["content"], str):
+                        # Look for JSON pattern in the content
+                        if (
+                            "{" in final_content["content"]
+                            and "}" in final_content["content"]
+                        ):
+                            # Extract JSON part
+                            start_idx = final_content["content"].find("{")
+                            end_idx = final_content["content"].rfind("}") + 1
+                            json_str = final_content["content"][start_idx:end_idx]
+                            parsed = json.loads(json_str)
+                            if "sources" in parsed:
+                                research_data["sources"].extend(parsed["sources"])
+                            if "snippets" in parsed:
+                                research_data["snippets"].extend(parsed["snippets"])
+                except (json.JSONDecodeError, KeyError):
+                    pass
+
+        # Also check messages for tool results that might contain research data
+        if res_dict.get("messages"):
+            for msg in res_dict["messages"]:
+                if msg.get("role") == "user" and msg.get("content"):
+                    for content_block in msg["content"]:
+                        if (
+                            isinstance(content_block, dict)
+                            and content_block.get("type") == "tool_result"
+                            and content_block.get("content")
+                        ):
+                            # This might contain research data from tools
+                            tool_content = content_block["content"]
+                            if isinstance(tool_content, list):
+                                for item in tool_content:
+                                    if (
+                                        isinstance(item, dict)
+                                        and item.get("type") == "text"
+                                    ):
+                                        # Check if this contains URLs or research data
+                                        text = item.get("text", "")
+                                        if "http" in text:
+                                            # Simple URL extraction
+                                            urls = re.findall(
+                                                r'https?://[^\s<>"]+|www\.[^\s<>"]+',
+                                                text,
+                                            )
+                                            research_data["sources"].extend(urls)
+
+        # Update instance variables
+        self.sources.extend(research_data["sources"])
+        self.snippets.extend(research_data["snippets"])
+
+        return (
+            research_data
+            if research_data["sources"] or research_data["snippets"]
+            else None
+        )
+
+    async def _execute(self) -> AsyncGenerator[Any, Any]:
         """Execute a single subagent using subagent prompt"""
         print(
             f"executing single subagent on task: {self.task.id} -> {self.task.objective}"
@@ -190,20 +305,20 @@ class SearchBot:
         ]
         start = time.monotonic()
         try:
-            result = await self.client.call_llm_with_tools(
+            async for result in self.client.call_llm_with_tools(
                 prompt=subagent_prompt,
                 system=self.system,
                 tools=subagent_tools_list,
                 model="claude-3-5-haiku-20241022",
                 timeout=self.TIMEOUT,
                 conversation_timeout=self.CONVERSATION_TIMEOUT,
-            )
-            out = self._normalize_orchestrator_result(result)
-            out["task_id"] = self.task.id
-            out["latency_ms"] = int((time.monotonic() - start) * 1000)
-            return out
+            ):
+                out = self._normalize_orchestrator_result(result)
+                out["task_id"] = self.task.id
+                out["latency_ms"] = int((time.monotonic() - start) * 1000)
+                yield out
         except asyncio.TimeoutError:
-            return {
+            result = {
                 "task_id": self.task.id,
                 "status": "timeout",
                 "final_response": "Subagent execution timed out",
@@ -212,8 +327,10 @@ class SearchBot:
                 "error": f"Exceeded {self.TIMEOUT}s timeout",
                 "latency_ms": int((time.monotonic() - start) * 1000),
             }
+            yield result
+            return
         except Exception as e:
-            return {
+            result = {
                 "task_id": self.task.id,
                 "status": "error",
                 "final_response": "...",
@@ -222,3 +339,5 @@ class SearchBot:
                 "error": str(e),
                 "latency_ms": int((time.monotonic() - start) * 1000),
             }
+            yield result
+            return

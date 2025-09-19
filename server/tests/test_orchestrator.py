@@ -1,6 +1,6 @@
 import pytest
 import json
-from orchestrator import ResearchOrchestrator
+from server.orchestrator import ResearchOrchestrator
 from utils.types import (
     TaskPlan,
     SubTask,
