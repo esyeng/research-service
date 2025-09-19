@@ -28,4 +28,4 @@ jobs:
                 EMAIL_TO: ${{ secrets.EMAIL_TO }}
                 NAME_USER: ${{ secrets.NAME_USER }}
                 NAME_TO: ${{ secrets.NAME_TO }}
-              run: python job-report.py
+              run: python server/job-report.py
