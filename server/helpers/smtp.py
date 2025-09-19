@@ -17,8 +17,9 @@ def require_env(name: str) -> str:
     return v.strip()
 
 
-EMAIL_PASS = require_env("EMAIL_PASS")
-EMAIL_USER = require_env("EMAIL_USER")
+def get_email_credentials():
+    """Get email credentials when needed instead of at module level"""
+    return require_env("EMAIL_USER"), require_env("EMAIL_PASS")
 
 
 def compose_mail(
@@ -31,6 +32,9 @@ def compose_mail(
     has_attachment: bool = False,
     max_retries=3,
 ):
+
+    # Get credentials when the function is called
+    EMAIL_USER, EMAIL_PASS = get_email_credentials()
 
     msg = MIMEMultipart()
     msg["Subject"] = subject
@@ -58,7 +62,7 @@ def compose_mail(
     try:
         smtp.ehlo()
         smtp.starttls()
-        smtp.login(EMAIL_USER, EMAIL_PASS)  # type: ignore
+        smtp.login(EMAIL_USER, EMAIL_PASS)
         for attempt in range(max_retries):
             try:
                 print("sending message...")

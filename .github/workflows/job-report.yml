@@ -9,23 +9,23 @@ on:
 jobs:
     run-researcher:
         runs-on: ubuntu-latest
+        env:
+            EMAIL_USER: ${{ secrets.EMAIL_USER }}
+            EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+            EMAIL_TO: ${{ secrets.EMAIL_TO }}
+            NAME_USER: ${{ secrets.NAME_USER }}
+            NAME_TO: ${{ secrets.NAME_TO }}
         steps:
-            - name: Checkout repo
-              uses: actions/checkout@v3
-
-            - name: Set up Python
-              uses: actions/setup-python@v4
-              with:
-                python-version: "3.11"
-            
-            - name: Install dependencies
-              run: cd server && pip install -r ./requirements.txt
-
-            - name: Run orchestrator
-              env:
-                EMAIL_USER: ${{ secrets.EMAIL_USER }}
-                EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
-                EMAIL_TO: ${{ secrets.EMAIL_TO }}
-                NAME_USER: ${{ secrets.NAME_USER }}
-                NAME_TO: ${{ secrets.NAME_TO }}
-              run: python server/job-report.py
+          - uses: actions/checkout@v4
+          - uses: actions/setup-python@v5
+            with:
+              python-version: "3.11"
+          - run: cd server && pip install -r requirements.txt
+          - name: Run scraper
+            env:
+              EMAIL_USER: ${{ secrets.EMAIL_USER }}
+              EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+              EMAIL_TO:   ${{ secrets.EMAIL_TO }}
+              NAME_USER:  ${{ secrets.NAME_USER }}   # or vars.NAME_USER if you saved it as a variable
+              NAME_TO:    ${{ secrets.NAME_TO }}     # same comment as above
+            run: python scrape-fin-data.py

@@ -20,15 +20,18 @@ def require_env(name: str) -> str:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return v.strip()
 
+def get_email_config():
+    """Get email configuration when needed instead of at module level"""
+    return (
+        require_env("EMAIL_USER"),
+        require_env("NAME_USER"),
+        require_env("NAME_TO"),
+        require_env("EMAIL_TO")
+    )
+
 date = datetime.now().date()
-
-
 PDF_FILENAME = f"job-market-status-report__{date}.pdf"
-EMAIL_USER = require_env("EMAIL_USER")
-NAME_USER = require_env("NAME_USER")
-NAME_TO = require_env("NAME_TO")
-EMAIL_TO = require_env("EMAIL_TO")
-    
+
 market_report_query = f"""
 Analyze the current job market for software engineers as of {date}. Focus on data and developments from the past 7 days, including:
 
@@ -69,7 +72,7 @@ def report_to_pdf(report: str):
 
     essay = extract_xml(report, 'essay')
     sources = extract_xml(report, 'sources')
-    
+
     full_string = f"{essay}\n\n{sources}"
 
     buffer = io.BytesIO()
@@ -113,7 +116,7 @@ async def run_and_write():
     print(PDF_FILENAME)
     try:
         result = await orchestrator.execute_research_sync(market_report_query, n_tasks=4, max_searches=5)
-    
+
         if result:
             pdf = report_to_pdf(result)
             if pdf:
@@ -123,9 +126,12 @@ async def run_and_write():
             return result
     except Exception as e:
         print(f"error running researcher on job-report, {e}")
-    
+
 
 async def main():
+    # Get email configuration when the function is called
+    EMAIL_USER, NAME_USER, NAME_TO, EMAIL_TO = get_email_config()
+
     out = await run_and_write()
     if out == True:
         try:
@@ -134,7 +140,7 @@ async def main():
                 frm=EMAIL_USER,
                 to=EMAIL_TO,
                 cc="yenigun13@gmail.com",
-                text="Hey me!\n\nHere's that weekly job market report you asked for 😊\n\nI hope your day goes well, keep up the good work!\n\nYou're doing great.\nI love you :)\n\nWarmly,\n{NAME_USER}\n\n",
+                text=f"Hey me!\\n\\nHere's that weekly job market report you asked for 😊\\n\\nI hope your day goes well, keep up the good work!\\n\\nYou're doing great.\\nI love you :)\\n\\nWarmly,\\n{NAME_USER}\\n\\n",
                 files=[PDF_FILENAME],
                 has_attachment=True
             )
