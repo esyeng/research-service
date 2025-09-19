@@ -28,7 +28,8 @@ def compose_mail(
     to: str | List[str],
     cc: str,
     text: str,
-    files: List[str],
+    files: List[str] | None = None,
+    html: str | None = None,
     has_attachment: bool = False,
     max_retries=3,
 ):
@@ -42,7 +43,14 @@ def compose_mail(
     msg["To"] = ", ".join(to) if isinstance(to, list) else to
     msg["Cc"] = cc
     msg.attach(MIMEText(text))
-    if has_attachment:
+    if html:
+        alternative = MIMEMultipart('alternative')
+        alternative.attach(MIMEText(text, 'plain'))
+        alternative.attach(MIMEText(html, 'html'))
+        msg.attach(alternative)
+    else:
+        msg.attach(MIMEText(text, 'plain'))
+    if has_attachment and files:
         for path in files:
             with open(path, "rb") as f:
                 try:

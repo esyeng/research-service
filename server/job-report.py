@@ -20,14 +20,16 @@ def require_env(name: str) -> str:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return v.strip()
 
+
 def get_email_config():
     """Get email configuration when needed instead of at module level"""
     return (
         require_env("EMAIL_USER"),
         require_env("NAME_USER"),
         require_env("NAME_TO"),
-        require_env("EMAIL_TO")
+        require_env("EMAIL_TO"),
     )
+
 
 date = datetime.now().date()
 PDF_FILENAME = f"job-market-status-report__{date}.pdf"
@@ -70,8 +72,8 @@ Please prioritize sources dated within the last 7-14 days and highlight any sign
 
 def report_to_pdf(report: str):
 
-    essay = extract_xml(report, 'essay')
-    sources = extract_xml(report, 'sources')
+    essay = extract_xml(report, "essay")
+    sources = extract_xml(report, "sources")
 
     full_string = f"{essay}\n\n{sources}"
 
@@ -83,7 +85,7 @@ def report_to_pdf(report: str):
     line_height = 14
     margin = 50
 
-    paragraphs = full_string.split('\n\n')
+    paragraphs = full_string.split("\n\n")
     font_name = "Helvetica"
     font_size = 12
     c.setFont(font_name, font_size)
@@ -105,27 +107,147 @@ def report_to_pdf(report: str):
     c.save()
     buffer.seek(0)
 
-    with open(PDF_FILENAME, 'wb') as f:
+    with open(PDF_FILENAME, "wb") as f:
         f.write(buffer.getvalue())
 
     return PDF_FILENAME
 
 
+def report_to_html(report: str):
+    """Convert report to mobile-friendly HTML with rendered markdown"""
+    essay = extract_xml(report, "essay")
+    sources = extract_xml(report, "sources")
+
+    # Convert markdown to HTML
+    html_content = markdown(f"{essay}\n\n{sources}")
+
+    # Mobile-friendly HTML template
+    html_template = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Job Market Report - {date}</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            color: #333;
+        }}
+        h1, h2, h3, h4 {{
+            color: #2c3e50;
+            margin-top: 1.5em;
+        }}
+        code {{
+            background-color: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Monaco', 'Menlo', monospace;
+        }}
+        pre {{
+            background-color: #f8f8f8;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+        }}
+        pre code {{
+            background: none;
+            padding: 0;
+        }}
+        blockquote {{
+            border-left: 4px solid #ddd;
+            padding-left: 15px;
+            margin-left: 0;
+            color: #666;
+        }}
+        a {{
+            color: #3498db;
+            text-decoration: none;
+        }}
+        a:hover {{
+            text-decoration: underline;
+        }}
+    </style>
+</head>
+<body>
+    {html_content}
+</body>
+</html>"""
+
+    html_filename = f"job-market-status-report__{date}.html"
+
+    with open(html_filename, "w", encoding="utf-8") as f:
+        f.write(html_template)
+
+    return html_filename
+
+
+def report_to_email_html(report: str):
+    """Convert report to email-friendly HTML (inline styles, table-based layout)"""
+    essay = extract_xml(report, "essay")
+    sources = extract_xml(report, "sources")
+    
+    # Convert markdown to HTML
+    html_content = markdown(f"{essay}\n\n{sources}")
+    
+    # Email-friendly HTML with inline styles (tables for better email client support)
+    email_html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: Arial, sans-serif; line-height: 1.4; color: #333333;">
+    <table width="100%" cellpadding="0" cellspacing="0" border="0">
+        <tr>
+            <td align="center" style="padding: 20px 0;">
+                <table width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width: 600px;">
+                    <tr>
+                        <td style="padding: 20px; background-color: #ffffff; border: 1px solid #e0e0e0;">
+                            {html_content}
+                            <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 30px 0;">
+                            <p style="font-size: 12px; color: #666666; text-align: center;">
+                                Job Market Report generated on {date}
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>"""
+    
+    return email_html
+
+
+
 async def run_and_write():
-    orchestrator = ResearchOrchestrator(4, market_report_prompt) # report writer instance
+    orchestrator = ResearchOrchestrator(
+        4, market_report_prompt
+    )  # report writer instance
     print(PDF_FILENAME)
     try:
-        result = await orchestrator.execute_research_sync(market_report_query, n_tasks=4, max_searches=5)
+        result = await orchestrator.execute_research_sync(
+            market_report_query, n_tasks=4, max_searches=5
+        )
 
         if result:
             pdf = report_to_pdf(result)
-            if pdf:
-                print('created pdf')
-                return True
+            html = report_to_html(result)
+            email_html = report_to_email_html(result)
+            if pdf and html:
+                print("created pdf and html files")
+                return True, email_html
             print(result)
             return result
     except Exception as e:
         print(f"error running researcher on job-report, {e}")
+
+
 
 
 async def main():
@@ -133,20 +255,23 @@ async def main():
     EMAIL_USER, NAME_USER, NAME_TO, EMAIL_TO = get_email_config()
 
     out = await run_and_write()
-    if out == True:
+    if isinstance(out, tuple) and out[0] == True:
+        email_html = out[1]
         try:
             compose_mail(
                 subject="Weekly Job Market Report",
                 frm=EMAIL_USER,
                 to=EMAIL_TO,
                 cc="yenigun13@gmail.com",
-                text=f"Hey me!\\n\\nHere's that weekly job market report you asked for 😊\\n\\nI hope your day goes well, keep up the good work!\\n\\nYou're doing great.\\nI love you :)\\n\\nWarmly,\\n{NAME_USER}\\n\\n",
+                text=f"Here's this week's report, Esmé! Good luck out there!",
+                html=email_html,
                 files=[PDF_FILENAME],
-                has_attachment=True
+                has_attachment=True,
             )
         except Exception as e:
             print(f"Error occurred: {e}")
             raise
+
 
 if __name__ == "__main__":
     asyncio.run(main())
