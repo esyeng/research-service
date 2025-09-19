@@ -1,21 +1,15 @@
 import asyncio
 import os
 import io
-   
-from typing import List
-from email.mime.text import MIMEText
-from email.mime.application import MIMEApplication
-from email.mime.multipart import MIMEMultipart
 from markdown import markdown
-from datetime import datetime, timedelta
+from datetime import datetime
 from helpers.smtp import compose_mail
 from helpers.data_methods import market_report_prompt, extract_xml
 from orchestrator import ResearchOrchestrator
-from tqdm import tqdm
-from dotenv import load_dotenv
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import simpleSplit
+from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -75,6 +69,9 @@ Please prioritize sources dated within the last 7-14 days and highlight any sign
 def report_to_pdf(report: str):
 
     essay = extract_xml(report, 'essay')
+    sources = extract_xml(report, 'sources')
+    
+    full_string = f"{essay}\n\n{sources}"
 
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=letter)
@@ -84,7 +81,7 @@ def report_to_pdf(report: str):
     line_height = 14
     margin = 50
 
-    paragraphs = essay.split('\n\n')
+    paragraphs = full_string.split('\n\n')
     font_name = "Helvetica"
     font_size = 12
     c.setFont(font_name, font_size)
@@ -112,7 +109,7 @@ def report_to_pdf(report: str):
     return PDF_FILENAME
 
 
-async def main():
+async def run_and_write():
     orchestrator = ResearchOrchestrator(4, market_report_prompt) # report writer instance
     print(PDF_FILENAME)
     try:
@@ -122,11 +119,29 @@ async def main():
             pdf = report_to_pdf(result)
             if pdf:
                 print('created pdf')
-                return pdf
+                return True
             print(result)
             return result
     except Exception as e:
         print(f"error running researcher on job-report, {e}")
+    
+
+async def main():
+    out = await run_and_write()
+    if out == True:
+        try:
+            compose_mail(
+                subject="Weekly Job Market Report",
+                frm=EMAIL_USER,
+                to=EMAIL_TO,
+                cc="yenigun13@gmail.com",
+                text="Hey me!\n\nHere's that weekly job market report you asked for 😊\n\nI hope your day goes well, keep up the good work!\n\nYou're doing great.\nI love you :)\n\nWarmly,\n{NAME_USER}\n\n",
+                files=[PDF_FILENAME],
+                has_attachment=True
+            )
+        except Exception as e:
+            print(f"Error occurred: {e}")
+            raise
 
 if __name__ == "__main__":
     asyncio.run(main())
